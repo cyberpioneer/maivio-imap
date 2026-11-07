@@ -1,0 +1,61 @@
+{
+    "name": "maivio/maivio-imap",
+    "description": "Modern, stream-based, zero-dependency native IMAP client & MIME parser for PHP and Laravel without ext-imap.",
+    "keywords": [
+        "imap",
+        "mime",
+        "email",
+        "mail",
+        "socket",
+        "stream",
+        "php84",
+        "php85",
+        "laravel",
+        "maivio"
+    ],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Slawa Mironow",
+            "email": "slawa@mironow.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2 || ^8.3 || ^8.4 || ^8.5"
+    },
+    "require-dev": {
+        "pestphp/pest": "^2.0 || ^3.0",
+        "mockery/mockery": "^1.6",
+        "orchestra/testbench": "^8.0 || ^9.0 || ^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Maivio\\Imap\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Maivio\\Imap\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Maivio\\Imap\\MaivioImapServiceProvider"
+            ],
+            "aliases": {
+                "Imap": "Maivio\\Imap\\Facades\\Imap"
+            }
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
