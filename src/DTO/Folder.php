@@ -7,15 +7,14 @@ namespace Maivio\Imap\DTO;
 class Folder
 {
     /**
-     * @param list<string> $attributes
+     * @param  list<string>  $attributes
      */
     public function __construct(
         protected string $name,
         protected string $rawName,
         protected string $delimiter = '/',
         protected array $attributes = [],
-    ) {
-    }
+    ) {}
 
     public function getName(): string
     {

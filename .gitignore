@@ -6,3 +6,4 @@ composer.lock
 *.bin
 *.tmp
 .env
+.phpunit.cache

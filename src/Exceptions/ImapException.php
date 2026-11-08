@@ -6,6 +6,4 @@ namespace Maivio\Imap\Exceptions;
 
 use RuntimeException;
 
-class ImapException extends RuntimeException
-{
-}
+class ImapException extends RuntimeException {}
