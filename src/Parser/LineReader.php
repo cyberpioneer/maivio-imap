@@ -16,11 +16,9 @@ final class LineReader
     private bool $atLineStart = true;
 
     /**
-     * @param resource $stream
+     * @param  resource  $stream
      */
-    public function __construct(private $stream)
-    {
-    }
+    public function __construct(private $stream) {}
 
     /**
      * @return array{data: string, lineStart: bool, eol: bool}|null null at end of stream

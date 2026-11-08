@@ -16,7 +16,7 @@ final class Literal
     private $stream;
 
     /**
-     * @param resource|null $stream
+     * @param  resource|null  $stream
      */
     private function __construct(
         private readonly ?string $data,
@@ -37,8 +37,8 @@ final class Literal
     }
 
     /**
-     * @param resource $stream Readable stream positioned at the first byte to send
-     * @param int $length Exact number of bytes that will be sent from the stream
+     * @param  resource  $stream  Readable stream positioned at the first byte to send
+     * @param  int  $length  Exact number of bytes that will be sent from the stream
      */
     public static function fromStream($stream, int $length): self
     {

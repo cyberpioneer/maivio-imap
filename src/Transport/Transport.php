@@ -22,7 +22,7 @@ interface Transport
     /**
      * Read between 1 and $length bytes.
      *
-     * @param int<1, max> $length
+     * @param  int<1, max>  $length
      *
      * @throws ImapConnectionException on EOF or timeout
      */

@@ -15,9 +15,9 @@ class Attachment
     protected string $originalFilename;
 
     /**
-     * @param resource|null $stream Decoded content. Null for the metadata-only object passed to an attachment sink.
-     * @param string|null $originalFilename Decoded name as sent by the remote side (control characters removed).
-     *                                      Metadata only: never use it as a file path.
+     * @param  resource|null  $stream  Decoded content. Null for the metadata-only object passed to an attachment sink.
+     * @param  string|null  $originalFilename  Decoded name as sent by the remote side (control characters removed).
+     *                                         Metadata only: never use it as a file path.
      */
     public function __construct(
         protected string $id,
@@ -119,7 +119,7 @@ class Attachment
     /**
      * Stream attachment directly into a file path or destination stream.
      *
-     * @param string|resource $destination Path chosen by the application (never derived from the attachment name) or a stream
+     * @param  string|resource  $destination  Path chosen by the application (never derived from the attachment name) or a stream
      * @return int Bytes written
      */
     public function saveTo(mixed $destination): int

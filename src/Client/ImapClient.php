@@ -10,6 +10,7 @@ use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
 use InvalidArgumentException;
+use Maivio\Imap\DTO\Attachment;
 use Maivio\Imap\DTO\Folder;
 use Maivio\Imap\DTO\FolderStatus;
 use Maivio\Imap\DTO\Message;
@@ -70,11 +71,11 @@ class ImapClient
     protected ?MimeParser $parser = null;
 
     /**
-     * @param (Closure(ConnectionOptions): Transport)|null $transportFactory Replaces the real socket transport (used for tests)
+     * @param  (Closure(ConnectionOptions): Transport)|null  $transportFactory  Replaces the real socket transport (used for tests)
      */
     public function __construct(?MimeParser $parser = null, protected ?Closure $transportFactory = null)
     {
-        $this->parser = $parser ?? new MimeParser();
+        $this->parser = $parser ?? new MimeParser;
     }
 
     public function __destruct()
@@ -88,8 +89,8 @@ class ImapClient
      * $encryption: "ssl"/"tls" (implicit TLS), "starttls" (upgrade via STARTTLS) or "none" (requires $allowInsecure).
      * Any other value throws; there is never a silent fallback to plaintext.
      *
-     * @param string|null $peerName Name to verify the certificate against (use together with a pre-resolved IP in $host)
-     * @param float|null $readTimeout Per-read timeout in seconds (defaults to $timeout)
+     * @param  string|null  $peerName  Name to verify the certificate against (use together with a pre-resolved IP in $host)
+     * @param  float|null  $readTimeout  Per-read timeout in seconds (defaults to $timeout)
      *
      * @throws InvalidArgumentException for unknown encryption modes or invalid host/port values
      * @throws ImapConnectionException when the connection cannot be established securely
@@ -182,7 +183,7 @@ class ImapClient
      * Receive every command sent and every response line read, as ($direction, $line) with "C" or "S".
      * Credentials are never passed: LOGIN/AUTHENTICATE are redacted and literal payloads are omitted.
      *
-     * @param (Closure(string, string): void)|null $logger
+     * @param  (Closure(string, string): void)|null  $logger
      */
     public function setDebugLogger(?Closure $logger): self
     {
@@ -486,8 +487,8 @@ class ImapClient
     /**
      * Search with a typed criteria builder.
      *
-     * @param SearchCriteria|string $criteria Raw strings are no longer supported (command injection risk) and fail immediately.
-     * @param int|null $limit Return at most this many UIDs (the lowest ones). The server still sends the complete result.
+     * @param  SearchCriteria|string  $criteria  Raw strings are no longer supported (command injection risk) and fail immediately.
+     * @param  int|null  $limit  Return at most this many UIDs (the lowest ones). The server still sends the complete result.
      * @return list<int>
      *
      * @throws BadMethodCallException when a raw string is passed
@@ -510,7 +511,7 @@ class ImapClient
     /**
      * Search UIDs inside a UID range. Prefer this over searchAllUids() on large mailboxes.
      *
-     * @param int|null $to Last UID or null for "everything from $from on"
+     * @param  int|null  $to  Last UID or null for "everything from $from on"
      * @return list<int>
      */
     public function searchUidRange(int $from, ?int $to = null, ?int $limit = null): array
@@ -567,7 +568,7 @@ class ImapClient
     /**
      * Fetch UID, FLAGS, INTERNALDATE, RFC822.SIZE and the main headers without the body and without setting \Seen.
      *
-     * @param int|list<int> $uids
+     * @param  int|list<int>  $uids
      * @return list<MessageSummary>
      */
     public function fetchSummaries(int|array $uids): array
@@ -603,7 +604,7 @@ class ImapClient
      *
      * RFC822.SIZE is checked first; an oversized message is rejected before any body data is downloaded.
      *
-     * @param int|null $maxSize Limit in bytes (defaults to setMaxMessageSize())
+     * @param  int|null  $maxSize  Limit in bytes (defaults to setMaxMessageSize())
      * @return resource Rewound php://temp stream (spills to disk) with the raw RFC 822 message
      *
      * @throws ImapMessageTooLargeException
@@ -646,16 +647,16 @@ class ImapClient
     /**
      * Fetch and parse an email message by UID into a Message DTO.
      *
-     * @param int|null $maxSize Maximum RFC822.SIZE in bytes; larger messages throw before any download
-     * @param (Closure(\Maivio\Imap\DTO\Attachment): resource)|null $attachmentSink Receives attachment metadata and returns the stream
-     *        the decoded attachment is written to (see MimeParser::parse())
+     * @param  int|null  $maxSize  Maximum RFC822.SIZE in bytes; larger messages throw before any download
+     * @param  (Closure(Attachment): resource)|null  $attachmentSink  Receives attachment metadata and returns the stream
+     *                                                                the decoded attachment is written to (see MimeParser::parse())
      */
     public function getMessage(int $uid, ?int $maxSize = null, ?Closure $attachmentSink = null): Message
     {
         $rawStream = $this->fetchRawStream($uid, $maxSize);
 
         try {
-            return ($this->parser ?? new MimeParser())->parse($rawStream, $uid, $attachmentSink);
+            return ($this->parser ?? new MimeParser)->parse($rawStream, $uid, $attachmentSink);
         } finally {
             fclose($rawStream);
         }
@@ -664,8 +665,8 @@ class ImapClient
     /**
      * Add flags (\Seen, \Flagged, \Answered, \Deleted, \Draft) to messages of the selected folder.
      *
-     * @param int|list<int> $uids
-     * @param Flag|string|list<Flag|string> $flags
+     * @param  int|list<int>  $uids
+     * @param  Flag|string|list<Flag|string>  $flags
      */
     public function addFlags(int|array $uids, Flag|string|array $flags): void
     {
@@ -673,8 +674,8 @@ class ImapClient
     }
 
     /**
-     * @param int|list<int> $uids
-     * @param Flag|string|list<Flag|string> $flags
+     * @param  int|list<int>  $uids
+     * @param  Flag|string|list<Flag|string>  $flags
      */
     public function removeFlags(int|array $uids, Flag|string|array $flags): void
     {
@@ -684,8 +685,8 @@ class ImapClient
     /**
      * Replace all flags of the messages with exactly this set.
      *
-     * @param int|list<int> $uids
-     * @param Flag|string|list<Flag|string> $flags
+     * @param  int|list<int>  $uids
+     * @param  Flag|string|list<Flag|string>  $flags
      */
     public function setFlags(int|array $uids, Flag|string|array $flags): void
     {
@@ -726,7 +727,7 @@ class ImapClient
      * Without MOVE and UIDPLUS an exception is thrown instead of issuing an EXPUNGE that would also remove
      * unrelated messages flagged \Deleted.
      *
-     * @param string|null $messageId Used to look up the new UID when the server sends no COPYUID
+     * @param  string|null  $messageId  Used to look up the new UID when the server sends no COPYUID
      * @return int|null UID in the target folder when it could be determined
      */
     public function moveMessage(string $sourceFolder, int $uid, string $targetFolder, ?string $messageId = null): ?int
@@ -790,8 +791,8 @@ class ImapClient
     /**
      * Append a message (e.g. a copy into "Sent").
      *
-     * @param string|resource $message Complete RFC 822 message with CRLF line endings; a readable seekable stream is sent in chunks
-     * @param Flag|string|list<Flag|string> $flags
+     * @param  string|resource  $message  Complete RFC 822 message with CRLF line endings; a readable seekable stream is sent in chunks
+     * @param  Flag|string|list<Flag|string>  $flags
      * @return int|null UID of the new message (needs UIDPLUS)
      */
     public function appendMessage(
@@ -990,7 +991,7 @@ class ImapClient
     }
 
     /**
-     * @param (Closure(string): string)|null $onContinuation Called for "+" lines; returns the line to send in reply
+     * @param  (Closure(string): string)|null  $onContinuation  Called for "+" lines; returns the line to send in reply
      */
     protected function readResponse(string $tag, ?Closure $onContinuation = null): Response
     {
@@ -1090,7 +1091,7 @@ class ImapClient
     /**
      * Copy exactly $size bytes of a literal from the connection into $sink.
      *
-     * @param resource $sink
+     * @param  resource  $sink
      */
     protected function copyLiteral(int $size, $sink): void
     {
@@ -1108,7 +1109,7 @@ class ImapClient
     /**
      * Download bytes [$offset, $offset + $length) of the message body into $sink.
      *
-     * @param resource $sink
+     * @param  resource  $sink
      * @return int Number of bytes received
      */
     protected function fetchChunk(int $uid, int $offset, int $length, $sink): int
@@ -1182,8 +1183,8 @@ class ImapClient
     }
 
     /**
-     * @param int|list<int> $uids
-     * @param Flag|string|list<Flag|string> $flags
+     * @param  int|list<int>  $uids
+     * @param  Flag|string|list<Flag|string>  $flags
      */
     protected function store(int|array $uids, string $mode, Flag|string|array $flags): void
     {
@@ -1321,7 +1322,7 @@ class ImapClient
     }
 
     /**
-     * @param int|list<int> $uids
+     * @param  int|list<int>  $uids
      * @return list<string> UID sets (comma/range notation), at most 500 UIDs each
      */
     protected function uidBatches(int|array $uids): array
@@ -1329,9 +1330,6 @@ class ImapClient
         $list = is_array($uids) ? $uids : [$uids];
 
         foreach ($list as $uid) {
-            if (! is_int($uid)) {
-                throw new InvalidArgumentException('UIDs must be integers.');
-            }
             $this->assertUid($uid);
         }
 
@@ -1366,7 +1364,7 @@ class ImapClient
     }
 
     /**
-     * @param list<int> $uids
+     * @param  list<int>  $uids
      * @return list<int>
      */
     protected function limit(array $uids, ?int $limit): array
@@ -1383,11 +1381,12 @@ class ImapClient
     }
 
     /**
-     * @param list<mixed> $list
+     * @param  array<mixed, mixed>  $list
      * @return array<string, mixed> Upper-cased key => value
      */
     protected function pairs(array $list): array
     {
+        $list = array_values($list);
         $result = [];
         for ($i = 0; $i + 1 < count($list); $i += 2) {
             if (is_string($list[$i])) {
@@ -1420,7 +1419,7 @@ class ImapClient
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     protected function buildSummary(array $data): ?MessageSummary
     {
@@ -1435,7 +1434,7 @@ class ImapClient
             }
         }
 
-        $parser = $this->parser ?? new MimeParser();
+        $parser = $this->parser ?? new MimeParser;
         $headers = $parser->parseHeaderBlock($headerBlock);
         [$senderEmail, $senderName] = isset($headers['from']) ? $parser->extractSender($headers['from']) : [null, null];
 

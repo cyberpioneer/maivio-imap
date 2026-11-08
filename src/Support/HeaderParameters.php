@@ -98,7 +98,7 @@ final class HeaderParameters
     }
 
     /**
-     * @param array<int, array{value: string, encoded: bool}> $segments
+     * @param  array<int, array{value: string, encoded: bool}>  $segments
      */
     private static function assemble(array $segments): string
     {
@@ -140,7 +140,9 @@ final class HeaderParameters
         }
 
         try {
-            return mb_convert_encoding($data, 'UTF-8', $charset);
+            $converted = mb_convert_encoding($data, 'UTF-8', $charset);
+
+            return $converted !== false ? $converted : $data;
         } catch (ValueError) {
             return $data;
         }

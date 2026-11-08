@@ -17,13 +17,13 @@ class ImapManager
     protected array $connections = [];
 
     /**
-     * @param array<string, mixed> $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         #[\SensitiveParameter] protected array $config = [],
         protected ?MimeParser $parser = null,
     ) {
-        $this->parser ??= new MimeParser();
+        $this->parser ??= new MimeParser;
     }
 
     /**
@@ -60,10 +60,10 @@ class ImapManager
      *     access_token?: string,
      *     timeout?: float,
      *     read_timeout?: float,
-     *     validate_cert?: bool,
-     *     allow_insecure?: bool,
+     *     validate_cert?: bool|string|null,
+     *     allow_insecure?: bool|string|null,
      *     peer_name?: string|null,
-     *     sni_enabled?: bool,
+     *     sni_enabled?: bool|string|null,
      *     sni_server_name?: string|null,
      *     max_message_size?: int|null,
      *     chunk_size?: int
@@ -92,7 +92,7 @@ class ImapManager
     }
 
     /**
-     * @param array<string, mixed> $config
+     * @param  array<string, mixed>  $config
      */
     protected function makeClient(#[\SensitiveParameter] array $config): ImapClient
     {
@@ -169,7 +169,7 @@ class ImapManager
     /**
      * Dynamically pass methods to the default connection.
      *
-     * @param array<int, mixed> $parameters
+     * @param  array<int, mixed>  $parameters
      */
     public function __call(string $method, #[\SensitiveParameter] array $parameters): mixed
     {

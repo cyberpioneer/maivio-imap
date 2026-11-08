@@ -25,11 +25,11 @@ use ValueError;
 class MimeParser
 {
     /**
-     * @param int $maxDepth Maximum multipart nesting depth (protects against MIME bombs)
-     * @param int $maxParts Maximum number of MIME parts per message
-     * @param int $maxAttachmentSize Maximum decoded size of a single attachment in bytes
-     * @param int $maxTextPartSize Maximum decoded size of a single text part / body in bytes
-     * @param int $maxHeaderSize Maximum size of one header block in bytes
+     * @param  int  $maxDepth  Maximum multipart nesting depth (protects against MIME bombs)
+     * @param  int  $maxParts  Maximum number of MIME parts per message
+     * @param  int  $maxAttachmentSize  Maximum decoded size of a single attachment in bytes
+     * @param  int  $maxTextPartSize  Maximum decoded size of a single text part / body in bytes
+     * @param  int  $maxHeaderSize  Maximum size of one header block in bytes
      */
     public function __construct(
         protected int $maxDepth = 10,
@@ -37,16 +37,15 @@ class MimeParser
         protected int $maxAttachmentSize = 104_857_600,
         protected int $maxTextPartSize = 10_485_760,
         protected int $maxHeaderSize = 262_144,
-    ) {
-    }
+    ) {}
 
     /**
      * Parse an RFC 822 email stream or raw string into a Message DTO.
      *
-     * @param resource|string $stream
-     * @param (Closure(Attachment): resource)|null $attachmentSink Receives a metadata-only Attachment and must return a
-     *        writable stream. The decoded attachment content is written to it chunk by chunk. The parser flushes but never
-     *        closes that stream; it stays owned by the caller.
+     * @param  resource|string  $stream
+     * @param  (Closure(Attachment): resource)|null  $attachmentSink  Receives a metadata-only Attachment and must return a
+     *                                                                writable stream. The decoded attachment content is written to it chunk by chunk. The parser flushes but never
+     *                                                                closes that stream; it stays owned by the caller.
      *
      * @throws MimeLimitExceededException when a depth, part count or size limit is exceeded
      */
@@ -101,7 +100,7 @@ class MimeParser
     }
 
     /**
-     * @param resource $stream
+     * @param  resource  $stream
      */
     protected function parseEmailStream($stream, ?int $uid, ParseContext $ctx): Message
     {
@@ -147,7 +146,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries Boundary stack, the last entry belongs to this multipart
+     * @param  list<string>  $boundaries  Boundary stack, the last entry belongs to this multipart
      */
     protected function parseMultipart(LineReader $reader, array $boundaries, int $depth, ParseContext $ctx): void
     {
@@ -169,7 +168,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      */
     protected function parsePart(LineReader $reader, array $boundaries, int $depth, ParseContext $ctx): void
     {
@@ -243,7 +242,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      */
     protected function readAttachment(
         LineReader $reader,
@@ -319,7 +318,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      */
     protected function readTextPart(LineReader $reader, array $boundaries, string $encoding, ParseContext $ctx): string
     {
@@ -337,7 +336,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      */
     protected function discardPart(LineReader $reader, array $boundaries, ParseContext $ctx): void
     {
@@ -347,8 +346,8 @@ class MimeParser
     /**
      * Read the content of one part up to the next boundary and hand the transfer-decoded bytes to $write in small chunks.
      *
-     * @param list<string> $boundaries
-     * @param Closure(string): void $write
+     * @param  list<string>  $boundaries
+     * @param  Closure(string): void  $write
      */
     protected function streamPart(LineReader $reader, array $boundaries, string $encoding, ParseContext $ctx, Closure $write): void
     {
@@ -408,8 +407,8 @@ class MimeParser
         }
 
         if ($encoding === 'base64' && $base64 !== '') {
-            $decoded = base64_decode(str_pad($base64, strlen($base64) + (4 - strlen($base64) % 4) % 4, '='), false);
-            if ($decoded !== false && $decoded !== '') {
+            $decoded = base64_decode(str_pad($base64, strlen($base64) + (4 - strlen($base64) % 4) % 4, '='));
+            if ($decoded !== '') {
                 $write($decoded);
             }
         } elseif ($encoding === 'quoted-printable' && $carry !== '') {
@@ -418,7 +417,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      */
     protected function skipToBoundary(LineReader $reader, array $boundaries, ParseContext $ctx): void
     {
@@ -434,7 +433,7 @@ class MimeParser
     }
 
     /**
-     * @param list<string> $boundaries
+     * @param  list<string>  $boundaries
      * @return array{index: int, close: bool}|null
      */
     protected function matchBoundary(string $line, array $boundaries): ?array
@@ -474,7 +473,7 @@ class MimeParser
     }
 
     /**
-     * @param resource $dest
+     * @param  resource  $dest
      */
     protected function writeAll($dest, string $bytes): void
     {
@@ -500,28 +499,6 @@ class MimeParser
         $logical = '';
         $total = 0;
 
-        $flush = function () use (&$headers, &$currentHeader, &$logical): void {
-            if ($logical === '') {
-                return;
-            }
-
-            $trimmed = rtrim($logical, "\r\n");
-            $logical = '';
-
-            if ($currentHeader !== null && ($trimmed[0] === ' ' || $trimmed[0] === "\t")) {
-                $headers[$currentHeader] .= ' '.trim($trimmed);
-
-                return;
-            }
-
-            $colon = strpos($trimmed, ':');
-            if ($colon !== false) {
-                $key = strtolower(trim(substr($trimmed, 0, $colon)));
-                $headers[$key] = trim(substr($trimmed, $colon + 1));
-                $currentHeader = $key;
-            }
-        };
-
         while (($chunk = $reader->next()) !== null) {
             $total += strlen($chunk['data']);
             if ($total > $this->maxHeaderSize) {
@@ -539,12 +516,40 @@ class MimeParser
                 break; // empty line ends the header block
             }
 
-            $flush();
+            $this->addHeaderLine($headers, $currentHeader, $logical);
+            $logical = '';
         }
 
-        $flush();
+        if ($logical !== '') {
+            $this->addHeaderLine($headers, $currentHeader, $logical);
+        }
 
         return $headers;
+    }
+
+    /**
+     * @param  array<string, string>  $headers
+     */
+    protected function addHeaderLine(array &$headers, ?string &$currentHeader, string $line): void
+    {
+        $trimmed = rtrim($line, "\r\n");
+        if ($trimmed === '') {
+            return;
+        }
+
+        // Folded continuation line
+        if ($currentHeader !== null && ($trimmed[0] === ' ' || $trimmed[0] === "\t")) {
+            $headers[$currentHeader] .= ' '.trim($trimmed);
+
+            return;
+        }
+
+        $colon = strpos($trimmed, ':');
+        if ($colon !== false) {
+            $key = strtolower(trim(substr($trimmed, 0, $colon)));
+            $headers[$key] = trim(substr($trimmed, $colon + 1));
+            $currentHeader = $key;
+        }
     }
 
     protected function convertToUtf8(string $content, string $charset): string
@@ -555,7 +560,9 @@ class MimeParser
         }
 
         try {
-            return mb_convert_encoding($content, 'UTF-8', $cleanCharset);
+            $converted = mb_convert_encoding($content, 'UTF-8', $cleanCharset);
+
+            return $converted !== false ? $converted : $content;
         } catch (ValueError) {
             return $content; // unknown charset
         }

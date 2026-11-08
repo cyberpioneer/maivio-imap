@@ -9,8 +9,8 @@ use DateTimeImmutable;
 class Message
 {
     /**
-     * @param array<string, string> $headers
-     * @param list<Attachment> $attachments
+     * @param  array<string, string>  $headers
+     * @param  list<Attachment>  $attachments
      */
     public function __construct(
         protected ?int $uid,
@@ -23,8 +23,7 @@ class Message
         protected ?string $bodyHtml,
         protected array $headers = [],
         protected array $attachments = [],
-    ) {
-    }
+    ) {}
 
     public function getUid(): ?int
     {

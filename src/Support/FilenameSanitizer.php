@@ -72,7 +72,7 @@ final class FilenameSanitizer
         }
 
         $name = mb_strcut($name, 0, $maxBytes - strlen($extension), 'UTF-8');
-        $name = rtrim($name, " .");
+        $name = rtrim($name, ' .');
 
         return ($name === '' ? 'attachment' : $name).$extension;
     }

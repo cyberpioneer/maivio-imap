@@ -10,7 +10,7 @@ use Maivio\Imap\ImapManager;
 
 /**
  * @method static ImapClient connection(?string $name = null)
- * @method static ImapClient connect(array $config)
+ * @method static ImapClient connect(array<string, mixed> $config)
  * @method static void disconnectAll()
  * @method static string getDefaultConnection()
  *

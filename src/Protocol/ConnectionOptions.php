@@ -13,14 +13,14 @@ use Maivio\Imap\Exceptions\ImapConnectionException;
 final class ConnectionOptions
 {
     /**
-     * @param string $host Hostname or (pre-resolved) IP address. No scheme.
-     * @param float $connectTimeout Seconds allowed for establishing the TCP connection.
-     * @param float $readTimeout Seconds allowed per read/write on the socket.
-     * @param string|null $peerName Name the certificate is verified against (SSL context "peer_name"). Use with a pre-resolved IP in $host.
-     * @param bool $sniEnabled SSL context "SNI_enabled".
-     * @param string|null $sniServerName SSL context "SNI_server_name" (defaults to $peerName, then $host).
-     * @param bool $allowInsecure Must be true to use Encryption::None.
-     * @param int $maxLineLength Maximum length of a single server response line in bytes.
+     * @param  string  $host  Hostname or (pre-resolved) IP address. No scheme.
+     * @param  float  $connectTimeout  Seconds allowed for establishing the TCP connection.
+     * @param  float  $readTimeout  Seconds allowed per read/write on the socket.
+     * @param  string|null  $peerName  Name the certificate is verified against (SSL context "peer_name"). Use with a pre-resolved IP in $host.
+     * @param  bool  $sniEnabled  SSL context "SNI_enabled".
+     * @param  string|null  $sniServerName  SSL context "SNI_server_name" (defaults to $peerName, then $host).
+     * @param  bool  $allowInsecure  Must be true to use Encryption::None.
+     * @param  int  $maxLineLength  Maximum length of a single server response line in bytes.
      */
     public function __construct(
         public readonly string $host,

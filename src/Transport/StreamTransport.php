@@ -17,7 +17,7 @@ final class StreamTransport implements Transport
     private $socket;
 
     /**
-     * @param resource $socket
+     * @param  resource  $socket
      */
     private function __construct($socket, private readonly int $maxLineLength)
     {
@@ -30,9 +30,13 @@ final class StreamTransport implements Transport
     }
 
     /**
+     * @param  array<string, mixed>  $sslOverrides  Additional SSL context options, e.g. ['cafile' => '/path/private-ca.pem'] when
+     *                                              building the transport yourself through the ImapClient transport factory. Cannot weaken verification by accident:
+     *                                              verify_peer/verify_peer_name are only changed if you pass them explicitly.
+     *
      * @throws ImapConnectionException
      */
-    public static function connect(ConnectionOptions $options): self
+    public static function connect(ConnectionOptions $options, array $sslOverrides = []): self
     {
         $host = str_contains($options->host, ':') && ! str_starts_with($options->host, '[')
             ? '['.$options->host.']'
@@ -42,7 +46,7 @@ final class StreamTransport implements Transport
         $scheme = $options->encryption === Encryption::Tls ? 'tls://' : 'tcp://';
         $remote = "{$scheme}{$host}:{$options->port}";
 
-        $context = stream_context_create(['ssl' => self::sslOptions($options)]);
+        $context = stream_context_create(['ssl' => [...self::sslOptions($options), ...$sslOverrides]]);
 
         $errno = 0;
         $errstr = '';
@@ -91,7 +95,7 @@ final class StreamTransport implements Transport
     {
         $socket = $this->requireSocket();
 
-        $line = fgets($socket, $this->maxLineLength + 1);
+        $line = fgets($socket, max(1, $this->maxLineLength) + 1);
         if ($line === false) {
             throw new ImapConnectionException($this->timedOut()
                 ? 'Timed out while reading from IMAP socket.'
@@ -146,7 +150,7 @@ final class StreamTransport implements Transport
         // Defence against STARTTLS response injection: plaintext that arrived together with the
         // "OK Begin TLS" line must never be interpreted as if it came through the TLS channel.
         $meta = stream_get_meta_data($socket);
-        if (($meta['unread_bytes'] ?? 0) > 0) {
+        if ($meta['unread_bytes'] > 0) {
             throw new ImapConnectionException('Unexpected data received before the TLS handshake (possible STARTTLS injection).');
         }
 
@@ -200,6 +204,6 @@ final class StreamTransport implements Transport
             return false;
         }
 
-        return (bool) (stream_get_meta_data($this->socket)['timed_out'] ?? false);
+        return stream_get_meta_data($this->socket)['timed_out'];
     }
 }

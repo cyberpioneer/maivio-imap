@@ -13,7 +13,7 @@ class MaivioImapServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/../config/maivio-imap.php', 'maivio-imap');
 
-        $this->app->singleton(MimeParser::class, fn () => new MimeParser());
+        $this->app->singleton(MimeParser::class, fn () => new MimeParser);
 
         $this->app->singleton(ImapManager::class, function ($app): ImapManager {
             $config = (array) $app['config']->get('maivio-imap', []);

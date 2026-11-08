@@ -15,8 +15,7 @@ class FolderStatus
         protected ?int $uidNext = null,
         protected ?int $uidValidity = null,
         protected ?int $unseen = null,
-    ) {
-    }
+    ) {}
 
     public function getName(): string
     {

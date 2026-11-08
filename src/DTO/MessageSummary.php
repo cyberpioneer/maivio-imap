@@ -12,8 +12,8 @@ use DateTimeImmutable;
 class MessageSummary
 {
     /**
-     * @param list<string> $flags e.g. ['\Seen', '\Flagged']
-     * @param array<string, string> $headers Lower-cased header name => decoded-on-demand raw value
+     * @param  list<string>  $flags  e.g. ['\Seen', '\Flagged']
+     * @param  array<string, string>  $headers  Lower-cased header name => decoded-on-demand raw value
      */
     public function __construct(
         protected int $uid,
@@ -26,8 +26,7 @@ class MessageSummary
         protected ?string $senderName,
         protected ?DateTimeImmutable $date,
         protected array $headers = [],
-    ) {
-    }
+    ) {}
 
     public function getUid(): int
     {

@@ -27,14 +27,11 @@ enum Flag: string
             }
         }
 
-        throw new InvalidArgumentException(sprintf(
-            "Unsupported IMAP flag '%s'. Allowed: \\Seen, \\Flagged, \\Answered, \\Deleted, \\Draft.",
-            preg_replace('/[^\x20-\x7E]/', '?', substr($flag, 0, 32))
-        ));
+        throw new InvalidArgumentException('Unsupported IMAP flag. Allowed: \\Seen, \\Flagged, \\Answered, \\Deleted, \\Draft.');
     }
 
     /**
-     * @param self|string|list<self|string> $flags
+     * @param  self|string|list<self|string>  $flags
      * @return list<self>
      */
     public static function normalizeList(self|string|array $flags): array

@@ -22,13 +22,11 @@ final class SearchCriteria
     /** @var list<array{key: string, type: 'flag'|'string'|'date'|'number'|'uid', value: string|int|null}> */
     private array $criteria = [];
 
-    private function __construct()
-    {
-    }
+    private function __construct() {}
 
     public static function new(): self
     {
-        return new self();
+        return new self;
     }
 
     public function all(): self
@@ -136,8 +134,8 @@ final class SearchCriteria
     }
 
     /**
-     * @param int $from First UID (>= 1)
-     * @param int|null $to Last UID, or null for "*" (highest UID)
+     * @param  int  $from  First UID (>= 1)
+     * @param  int|null  $to  Last UID, or null for "*" (highest UID)
      */
     public function uidRange(int $from, ?int $to = null): self
     {
@@ -186,7 +184,7 @@ final class SearchCriteria
     }
 
     /**
-     * @param 'flag'|'string'|'date'|'number'|'uid' $type
+     * @param  'flag'|'string'|'date'|'number'|'uid'  $type
      */
     private function with(string $key, string $type, string|int|null $value = null): self
     {

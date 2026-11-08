@@ -31,9 +31,7 @@ final class ParseContext
     public ?array $hit = null;
 
     /**
-     * @param (Closure(Attachment): resource)|null $attachmentSink
+     * @param  (Closure(Attachment): resource)|null  $attachmentSink
      */
-    public function __construct(public readonly ?Closure $attachmentSink = null)
-    {
-    }
+    public function __construct(public readonly ?Closure $attachmentSink = null) {}
 }

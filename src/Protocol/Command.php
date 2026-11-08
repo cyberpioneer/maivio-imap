@@ -22,9 +22,7 @@ final class Command
 
     private bool $sensitive = false;
 
-    private function __construct(private readonly string $verb)
-    {
-    }
+    private function __construct(private readonly string $verb) {}
 
     public static function make(string $verb): self
     {

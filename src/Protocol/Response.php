@@ -10,17 +10,16 @@ namespace Maivio\Imap\Protocol;
 final class Response
 {
     /**
-     * @param string $status OK, NO or BAD
-     * @param string $text Text following the status in the tagged line
-     * @param list<string> $untagged Untagged response lines (literals are inlined as "{n}\r\n<bytes>")
+     * @param  string  $status  OK, NO or BAD
+     * @param  string  $text  Text following the status in the tagged line
+     * @param  list<string>  $untagged  Untagged response lines (literals are inlined as "{n}\r\n<bytes>")
      */
     public function __construct(
         public readonly string $tag,
         public readonly string $status,
         public readonly string $text,
         public readonly array $untagged,
-    ) {
-    }
+    ) {}
 
     public function ok(): bool
     {
