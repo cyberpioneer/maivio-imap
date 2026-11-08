@@ -10,7 +10,7 @@ class AttachmentTest extends TestCase
 {
     public function test_attachment_streaming_and_saving(): void
     {
-        $stream = fopen('php://temp', 'r+b');
+        $stream = $this->tempStream('', 'php://temp', 'r+b');
         fwrite($stream, 'Hello World PDF Content');
         rewind($stream);
 

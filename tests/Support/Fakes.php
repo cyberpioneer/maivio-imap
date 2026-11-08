@@ -14,7 +14,7 @@ use Maivio\Imap\Protocol\ConnectionOptions;
 final class Fakes
 {
     /**
-     * @param Closure(FakeTransport): void|null $configure
+     * @param  Closure(FakeTransport): void|null  $configure
      * @return array{0: ImapClient, 1: FakeTransport}
      */
     public static function client(?Closure $configure = null, string $encryption = 'ssl', bool $allowInsecure = false, bool $connect = true): array
@@ -33,8 +33,8 @@ final class Fakes
     /**
      * A connected, logged-in client with MOVE/UIDPLUS and no extra capabilities unless overridden.
      *
-     * @param list<string>|null $capabilities
-     * @param Closure(FakeTransport): void|null $configure
+     * @param  list<string>|null  $capabilities
+     * @param  Closure(FakeTransport): void|null  $configure
      * @return array{0: ImapClient, 1: FakeTransport}
      */
     public static function loggedIn(?array $capabilities = null, ?Closure $configure = null): array

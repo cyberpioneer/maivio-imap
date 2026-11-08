@@ -20,6 +20,7 @@ final class FakeTransport implements Transport
     public array $capabilities = ['IMAP4REV1', 'STARTTLS', 'UIDPLUS', 'MOVE'];
 
     /** Capabilities announced after the TLS handshake (defaults to $capabilities minus STARTTLS). */
+    /** @var list<string>|null */
     public ?array $capabilitiesAfterTls = null;
 
     public string $greeting = "* OK IMAP ready\r\n";
@@ -52,6 +53,9 @@ final class FakeTransport implements Transport
 
     private int $literalRemaining = 0;
 
+    /** @var (Closure(string): string)|null Receives the next complete client line instead of the command dispatcher (SASL continuation) */
+    private ?Closure $continuation = null;
+
     /** @var array<string, Closure(string, string, string): string> */
     private array $handlers = [];
 
@@ -62,7 +66,7 @@ final class FakeTransport implements Transport
 
     public static function make(?Closure $configure = null): self
     {
-        $transport = new self();
+        $transport = new self;
         if ($configure !== null) {
             $configure($transport);
         }
@@ -72,11 +76,23 @@ final class FakeTransport implements Transport
     }
 
     /**
-     * @param Closure(string $tag, string $args, string $full): string $handler Returns raw server output including the tagged line
+     * @param  Closure(string $tag, string $args, string $full): string  $handler  Returns raw server output including the tagged line
      */
     public function on(string $verb, Closure $handler): self
     {
         $this->handlers[strtoupper($verb)] = $handler;
+
+        return $this;
+    }
+
+    /**
+     * The next complete line written by the client is passed to $handler (a SASL response), not parsed as a command.
+     *
+     * @param  Closure(string): string  $handler  Returns raw server output
+     */
+    public function expectContinuation(Closure $handler): self
+    {
+        $this->continuation = $handler;
 
         return $this;
     }
@@ -211,6 +227,15 @@ final class FakeTransport implements Transport
 
             $command = $this->current;
             $this->current = '';
+
+            if ($this->continuation !== null) {
+                $handler = $this->continuation;
+                $this->continuation = null;
+                $this->out .= $handler($command);
+
+                continue;
+            }
+
             $this->dispatch($command);
         }
     }

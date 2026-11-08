@@ -10,7 +10,7 @@ class ImapClientTest extends TestCase
 {
     public function test_utf7_folder_encoding_and_decoding(): void
     {
-        $client = new ImapClient();
+        $client = new ImapClient;
 
         $original = 'Entwürfe & Vorlagen';
         $encoded = $client->encodeUtf7($original);

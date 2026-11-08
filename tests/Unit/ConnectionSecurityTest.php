@@ -11,8 +11,8 @@ use Maivio\Imap\Exceptions\ImapConnectionException;
 use Maivio\Imap\ImapManager;
 use Maivio\Imap\Protocol\ConnectionOptions;
 use Maivio\Imap\Protocol\Encryption;
-use Maivio\Imap\Tests\Support\FakeTransport;
 use Maivio\Imap\Tests\Support\Fakes;
+use Maivio\Imap\Tests\Support\FakeTransport;
 use Maivio\Imap\Tests\TestCase;
 use Maivio\Imap\Transport\StreamTransport;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -201,7 +201,7 @@ class ConnectionSecurityTest extends TestCase
 
     public function test_login_requires_a_connection(): void
     {
-        $client = new ImapClient();
+        $client = new ImapClient;
 
         $this->expectException(ImapConnectionException::class);
         $client->login('user', 'secret');

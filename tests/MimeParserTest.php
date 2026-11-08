@@ -19,7 +19,7 @@ class MimeParserTest extends TestCase
             ."\r\n"
             ."Hello Jane,\r\nThis is a simple email body.";
 
-        $parser = new MimeParser();
+        $parser = new MimeParser;
         $message = $parser->parse($rawEmail, 42);
 
         $this->assertSame(42, $message->getUid());
@@ -27,7 +27,7 @@ class MimeParserTest extends TestCase
         $this->assertSame('Simple Test', $message->getSubject());
         $this->assertSame('john@example.com', $message->getSenderEmail());
         $this->assertSame('John Doe', $message->getSenderName());
-        $this->assertStringContainsString('Hello Jane,', $message->getBodyText());
+        $this->assertStringContainsString('Hello Jane,', (string) $message->getBodyText());
         $this->assertNull($message->getBodyHtml());
         $this->assertCount(0, $message->getAttachments());
     }
@@ -52,12 +52,12 @@ class MimeParserTest extends TestCase
             .base64_encode('PDF-INVOICE-BINARY-STREAM')
             ."\r\n--{$boundary}--\r\n";
 
-        $parser = new MimeParser();
+        $parser = new MimeParser;
         $message = $parser->parse($rawEmail);
 
         $this->assertSame('Rechnung für Maivio', $message->getSubject());
         $this->assertSame('invoice@company.de', $message->getSenderEmail());
-        $this->assertStringContainsString('Anbei Ihre Rechnung.', $message->getBodyText());
+        $this->assertStringContainsString('Anbei Ihre Rechnung.', (string) $message->getBodyText());
         $this->assertCount(1, $message->getAttachments());
 
         $attachment = $message->getAttachments()[0];
