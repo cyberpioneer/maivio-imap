@@ -4,27 +4,75 @@ declare(strict_types=1);
 
 namespace Maivio\Imap\Client;
 
+use BadMethodCallException;
+use Closure;
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
+use InvalidArgumentException;
 use Maivio\Imap\DTO\Folder;
+use Maivio\Imap\DTO\FolderStatus;
 use Maivio\Imap\DTO\Message;
+use Maivio\Imap\DTO\MessageSummary;
 use Maivio\Imap\Exceptions\ImapAuthenticationException;
 use Maivio\Imap\Exceptions\ImapCommandException;
 use Maivio\Imap\Exceptions\ImapConnectionException;
+use Maivio\Imap\Exceptions\ImapMessageTooLargeException;
 use Maivio\Imap\Parser\MimeParser;
+use Maivio\Imap\Protocol\Command;
+use Maivio\Imap\Protocol\ConnectionOptions;
+use Maivio\Imap\Protocol\Encoder;
+use Maivio\Imap\Protocol\Encryption;
+use Maivio\Imap\Protocol\Flag;
+use Maivio\Imap\Protocol\ImapParser;
+use Maivio\Imap\Protocol\Literal;
+use Maivio\Imap\Protocol\Mutf7;
+use Maivio\Imap\Protocol\Response;
+use Maivio\Imap\Search\SearchCriteria;
+use Maivio\Imap\Transport\StreamTransport;
+use Maivio\Imap\Transport\Transport;
+use Throwable;
 
 class ImapClient
 {
-    /**
-     * @var resource|null
-     */
-    protected $socket = null;
+    protected ?Transport $transport = null;
 
     protected int $tagCounter = 0;
 
     protected bool $connected = false;
 
+    /** True once the connection is protected by TLS (or insecure mode was explicitly allowed). */
+    protected bool $secure = false;
+
+    protected bool $allowInsecure = false;
+
+    /** @var list<string> Upper-cased capability tokens of the current connection state */
+    protected array $capabilities = [];
+
+    protected ?string $selectedMailbox = null;
+
+    /** @var (Closure(string, string): void)|null */
+    protected ?Closure $debugLogger = null;
+
+    /** @var list<string> Credentials used on this connection; scrubbed from every server text that ends up in an exception */
+    protected array $secrets = [];
+
+    protected ?int $maxMessageSize = null;
+
+    protected int $chunkSize = 524_288;
+
+    /** Maximum size of a single literal that is read into memory (response metadata, not message bodies). */
+    protected int $maxInlineLiteral = 16_777_216;
+
+    /** Maximum total size of the untagged data belonging to one command. */
+    protected int $maxResponseSize = 67_108_864;
+
     protected ?MimeParser $parser = null;
 
-    public function __construct(?MimeParser $parser = null)
+    /**
+     * @param (Closure(ConnectionOptions): Transport)|null $transportFactory Replaces the real socket transport (used for tests)
+     */
+    public function __construct(?MimeParser $parser = null, protected ?Closure $transportFactory = null)
     {
         $this->parser = $parser ?? new MimeParser();
     }
@@ -35,60 +83,76 @@ class ImapClient
     }
 
     /**
-     * Connect to the IMAP server via stream_socket_client.
+     * Connect to the IMAP server.
+     *
+     * $encryption: "ssl"/"tls" (implicit TLS), "starttls" (upgrade via STARTTLS) or "none" (requires $allowInsecure).
+     * Any other value throws; there is never a silent fallback to plaintext.
+     *
+     * @param string|null $peerName Name to verify the certificate against (use together with a pre-resolved IP in $host)
+     * @param float|null $readTimeout Per-read timeout in seconds (defaults to $timeout)
+     *
+     * @throws InvalidArgumentException for unknown encryption modes or invalid host/port values
+     * @throws ImapConnectionException when the connection cannot be established securely
      */
     public function connect(
         string $host,
         int $port = 993,
         string $encryption = 'ssl',
         float $timeout = 30.0,
-        bool $validateCert = true
+        bool $validateCert = true,
+        ?string $peerName = null,
+        bool $allowInsecure = false,
+        ?float $readTimeout = null,
+        bool $sniEnabled = true,
+        ?string $sniServerName = null,
     ): self {
-        if ($this->connected && is_resource($this->socket)) {
+        return $this->connectWith(new ConnectionOptions(
+            host: $host,
+            port: $port,
+            encryption: Encryption::fromString($encryption),
+            connectTimeout: $timeout,
+            readTimeout: $readTimeout ?? $timeout,
+            validateCert: $validateCert,
+            peerName: $peerName,
+            sniEnabled: $sniEnabled,
+            sniServerName: $sniServerName,
+            allowInsecure: $allowInsecure,
+        ));
+    }
+
+    public function connectWith(ConnectionOptions $options): self
+    {
+        if ($this->connected) {
             $this->disconnect();
         }
 
-        $cleanHost = preg_replace('#^(ssl|tls|tcp)://#i', '', $host) ?? $host;
-        $scheme = match (strtolower($encryption)) {
-            'ssl', 'ssl://' => 'ssl://',
-            'tls', 'tls://' => 'tls://',
-            default => 'tcp://',
-        };
+        $this->transport = $this->transportFactory !== null
+            ? ($this->transportFactory)($options)
+            : StreamTransport::connect($options);
 
-        $remoteSocket = "{$scheme}{$cleanHost}:{$port}";
-
-        $context = stream_context_create([
-            'ssl' => [
-                'verify_peer' => $validateCert,
-                'verify_peer_name' => $validateCert,
-                'allow_self_signed' => ! $validateCert,
-            ],
-        ]);
-
-        $errno = 0;
-        $errstr = '';
-
-        $socket = @stream_socket_client(
-            $remoteSocket,
-            $errno,
-            $errstr,
-            $timeout,
-            STREAM_CLIENT_CONNECT,
-            $context
-        );
-
-        if (! is_resource($socket)) {
-            throw new ImapConnectionException("IMAP connection to {$remoteSocket} failed ({$errno}): {$errstr}");
-        }
-
-        $this->socket = $socket;
-        stream_set_timeout($this->socket, (int) $timeout);
         $this->connected = true;
+        $this->allowInsecure = $options->allowInsecure;
+        $this->secure = $options->encryption === Encryption::Tls;
+        $this->capabilities = [];
+        $this->secrets = [];
+        $this->selectedMailbox = null;
 
-        $greeting = $this->readLine();
-        if (! str_starts_with($greeting, '* OK')) {
-            $this->disconnect();
-            throw new ImapConnectionException("Unexpected IMAP greeting from {$remoteSocket}: {$greeting}");
+        try {
+            $greeting = $this->readLine();
+            if (! str_starts_with($greeting, '* OK')) {
+                throw new ImapConnectionException("Unexpected IMAP greeting from {$options->host}: ".$this->scrub($greeting));
+            }
+
+            $this->refreshCapabilities();
+
+            if ($options->encryption === Encryption::StartTls) {
+                $this->upgradeToTls();
+            }
+        } catch (Throwable $e) {
+            // Never continue (and never log in) on a connection that is not in the expected state.
+            $this->closeQuietly();
+
+            throw $e;
         }
 
         return $this;
@@ -96,21 +160,91 @@ class ImapClient
 
     public function isConnected(): bool
     {
-        return $this->connected && is_resource($this->socket);
+        return $this->connected && $this->transport !== null && $this->transport->isOpen();
     }
 
     /**
-     * Authenticate using traditional username and password (LOGIN).
+     * Capability tokens advertised by the server (upper-case).
+     *
+     * @return list<string>
      */
-    public function login(string $username, string $password): self
+    public function getCapabilities(): array
     {
-        $escapedUser = $this->escapeString($username);
-        $escapedPass = $this->escapeString($password);
+        return $this->capabilities;
+    }
 
-        $response = $this->sendCommand("LOGIN {$escapedUser} {$escapedPass}");
-        if (! $response['ok']) {
-            throw new ImapAuthenticationException("LOGIN failed for user '{$username}': {$response['status']}");
+    public function hasCapability(string $capability): bool
+    {
+        return in_array(strtoupper($capability), $this->capabilities, true);
+    }
+
+    /**
+     * Receive every command sent and every response line read, as ($direction, $line) with "C" or "S".
+     * Credentials are never passed: LOGIN/AUTHENTICATE are redacted and literal payloads are omitted.
+     *
+     * @param (Closure(string, string): void)|null $logger
+     */
+    public function setDebugLogger(?Closure $logger): self
+    {
+        $this->debugLogger = $logger;
+
+        return $this;
+    }
+
+    /**
+     * Default upper limit (bytes) for getMessage()/fetchRawStream(). Null = unlimited.
+     */
+    public function setMaxMessageSize(?int $bytes): self
+    {
+        if ($bytes !== null && $bytes < 1) {
+            throw new InvalidArgumentException('Maximum message size must be positive.');
         }
+
+        $this->maxMessageSize = $bytes;
+
+        return $this;
+    }
+
+    /**
+     * Size (bytes) of each BODY.PEEK[]<offset.limit> request used to download a message.
+     */
+    public function setChunkSize(int $bytes): self
+    {
+        if ($bytes < 1024) {
+            throw new InvalidArgumentException('Chunk size must be at least 1024 bytes.');
+        }
+
+        $this->chunkSize = $bytes;
+
+        return $this;
+    }
+
+    /**
+     * Authenticate using username and password (LOGIN). Refuses to send anything over a connection that is
+     * neither TLS-protected nor explicitly allowed to be insecure, and when the server announces LOGINDISABLED.
+     */
+    public function login(#[\SensitiveParameter] string $username, #[\SensitiveParameter] string $password): self
+    {
+        $this->assertMayAuthenticate();
+
+        if ($this->hasCapability('LOGINDISABLED')) {
+            throw new ImapAuthenticationException('The server has disabled LOGIN (LOGINDISABLED).');
+        }
+
+        // Validation happens while building the command, before a single byte is sent.
+        $command = Command::make('LOGIN')
+            ->sensitive()
+            ->string($username, 'username')
+            ->string($password, 'password');
+
+        $this->secrets = [...$this->secrets, $username, $password];
+
+        $response = $this->execute($command);
+        if (! $response->ok()) {
+            throw new ImapAuthenticationException('LOGIN failed: '.$this->scrub($response->statusLine()));
+        }
+
+        $this->refreshCapabilities();
 
         return $this;
     }
@@ -118,82 +252,213 @@ class ImapClient
     /**
      * Authenticate using SASL XOAUTH2 token (Gmail, Google Workspace, Microsoft 365, Outlook).
      */
-    public function authenticateXOAuth2(string $username, string $accessToken): self
+    public function authenticateXOAuth2(#[\SensitiveParameter] string $username, #[\SensitiveParameter] string $accessToken): self
     {
-        // SASL XOAUTH2 format: "user=" {User} "^Aauth=Bearer " {Access Token} "^A^A"
-        $authString = "user={$username}\x01auth=Bearer {$accessToken}\x01\x01";
-        $encoded = base64_encode($authString);
+        $this->assertMayAuthenticate();
 
-        $response = $this->sendCommand("AUTHENTICATE XOAUTH2 {$encoded}");
-        if (! $response['ok']) {
-            throw new ImapAuthenticationException("XOAUTH2 authentication failed for user '{$username}': {$response['status']}");
+        foreach ([$username, $accessToken] as $value) {
+            Encoder::assertSafe($value, 'XOAUTH2 credential');
+            if (str_contains($value, "\x01")) {
+                throw new InvalidArgumentException('Invalid XOAUTH2 credential: control character not allowed.');
+            }
         }
+
+        // SASL XOAUTH2 format: "user=" {User} "^Aauth=Bearer " {Access Token} "^A^A"
+        $payload = base64_encode("user={$username}\x01auth=Bearer {$accessToken}\x01\x01");
+        $this->secrets = [...$this->secrets, $username, $accessToken, $payload];
+
+        $command = Command::make('AUTHENTICATE')->sensitive()->atom('XOAUTH2');
+        $sentInitialResponse = $this->hasCapability('SASL-IR');
+        if ($sentInitialResponse) {
+            $command->base64($payload);
+        }
+
+        $answered = false;
+        $response = $this->execute($command, function () use (&$answered, $sentInitialResponse, $payload): string {
+            // First "+" without SASL-IR asks for the payload; every further "+" is the error report: cancel with an empty line.
+            if (! $sentInitialResponse && ! $answered) {
+                $answered = true;
+
+                return $payload;
+            }
+
+            return '';
+        });
+
+        if (! $response->ok()) {
+            throw new ImapAuthenticationException('XOAUTH2 authentication failed: '.$this->scrub($response->statusLine()));
+        }
+
+        $this->refreshCapabilities();
 
         return $this;
     }
 
     /**
-     * List mail folders.
+     * List mail folders including hierarchy delimiter and attributes (\Sent, \Trash, \Drafts, \Junk, \Archive, ...).
+     * Uses LIST-EXTENDED RETURN (SPECIAL-USE) when the server supports it, otherwise the attributes of the plain LIST.
      *
      * @return list<Folder>
      */
     public function listFolders(string $reference = '', string $pattern = '*'): array
     {
-        $escapedRef = $this->escapeString($this->encodeUtf7($reference));
-        $escapedPattern = $this->escapeString($this->encodeUtf7($pattern));
+        $command = Command::make('LIST')
+            ->mailbox($reference, 'list reference')
+            ->mailbox($pattern, 'list pattern');
 
-        $response = $this->sendCommand("LIST {$escapedRef} {$escapedPattern}");
-        $this->assertTaggedOk($response, 'LIST failed');
+        if ($this->hasCapability('LIST-EXTENDED') && $this->hasCapability('SPECIAL-USE')) {
+            $command->atom('RETURN (SPECIAL-USE)');
+        }
+
+        $response = $this->execute($command);
+        $this->assertOk($response, 'LIST failed');
 
         $folders = [];
 
-        foreach ($response['lines'] as $line) {
-            if (! str_starts_with($line, '* LIST')) {
+        foreach ($response->untagged as $line) {
+            if (preg_match('/\A\*\s+LIST\s+(.*)\z/is', $line, $match) !== 1) {
                 continue;
             }
 
-            // Matches e.g.: * LIST (\HasNoChildren \Trash) "/" "INBOX/Trash"
-            if (preg_match('/^\*\s+LIST\s+\(([^)]*)\)\s+(?:"([^"]*)"|NIL)\s+(?:"([^"]+)"|(\S+))$/i', trim($line), $matches)) {
-                $attrsRaw = trim($matches[1]);
-                $attributes = $attrsRaw !== '' ? preg_split('/\s+/', $attrsRaw) ?: [] : [];
-                $delimiter = ! empty($matches[2]) ? $matches[2] : '/';
-                $rawFolder = ! empty($matches[3]) ? $matches[3] : ($matches[4] ?? '');
-
-                if ($rawFolder !== '') {
-                    $decodedName = $this->decodeUtf7($rawFolder);
-                    $folders[] = new Folder(
-                        name: $decodedName,
-                        rawName: $rawFolder,
-                        delimiter: $delimiter,
-                        attributes: $attributes
-                    );
-                }
+            $tokens = ImapParser::parse($match[1]);
+            if (! isset($tokens[0], $tokens[2]) || ! is_array($tokens[0]) || ! is_string($tokens[2]) || $tokens[2] === '') {
+                continue;
             }
+
+            $attributes = array_values(array_filter($tokens[0], 'is_string'));
+            $rawName = $tokens[2];
+
+            try {
+                $name = Mutf7::decode($rawName);
+            } catch (InvalidArgumentException) {
+                $name = $rawName;
+            }
+
+            $folders[] = new Folder(
+                name: $name,
+                rawName: $rawName,
+                delimiter: is_string($tokens[1] ?? null) ? $tokens[1] : '',
+                attributes: $attributes,
+            );
         }
 
         return $folders;
     }
 
     /**
-     * Select a mailbox folder.
+     * Create a folder. Names with wildcards (* %) or braces are rejected.
+     */
+    public function createFolder(string $name, bool $subscribe = false): void
+    {
+        $this->assertManageableFolderName($name);
+
+        $this->assertOk($this->execute(Command::make('CREATE')->mailbox($name, 'folder name')), 'CREATE failed');
+
+        if ($subscribe) {
+            $this->subscribeFolder($name);
+        }
+    }
+
+    /**
+     * Rename a folder. INBOX can neither be the source nor the target.
+     */
+    public function renameFolder(string $from, string $to): void
+    {
+        $this->assertManageableFolderName($from);
+        $this->assertManageableFolderName($to);
+        $this->assertNotInbox($from, 'rename');
+        $this->assertNotInbox($to, 'rename to');
+
+        $this->assertOk(
+            $this->execute(Command::make('RENAME')->mailbox($from, 'folder name')->mailbox($to, 'folder name')),
+            'RENAME failed'
+        );
+
+        if ($this->selectedMailbox !== null && strcasecmp($this->selectedMailbox, $from) === 0) {
+            $this->selectedMailbox = null;
+        }
+    }
+
+    /**
+     * Delete a folder. INBOX cannot be deleted.
+     */
+    public function deleteFolder(string $name, bool $unsubscribe = false): void
+    {
+        $this->assertManageableFolderName($name);
+        $this->assertNotInbox($name, 'delete');
+
+        $this->assertOk($this->execute(Command::make('DELETE')->mailbox($name, 'folder name')), 'DELETE failed');
+
+        if ($this->selectedMailbox !== null && $this->selectedMailbox === $name) {
+            $this->selectedMailbox = null;
+        }
+
+        if ($unsubscribe) {
+            $this->unsubscribeFolder($name);
+        }
+    }
+
+    public function subscribeFolder(string $name): void
+    {
+        $this->assertManageableFolderName($name);
+        $this->assertOk($this->execute(Command::make('SUBSCRIBE')->mailbox($name, 'folder name')), 'SUBSCRIBE failed');
+    }
+
+    public function unsubscribeFolder(string $name): void
+    {
+        $this->assertManageableFolderName($name);
+        $this->assertOk($this->execute(Command::make('UNSUBSCRIBE')->mailbox($name, 'folder name')), 'UNSUBSCRIBE failed');
+    }
+
+    /**
+     * Folder counters via STATUS, without selecting the folder.
+     */
+    public function folderStatus(string $mailbox): FolderStatus
+    {
+        $command = Command::make('STATUS')->mailbox($mailbox)->atom('(MESSAGES UIDNEXT UIDVALIDITY UNSEEN)');
+        $response = $this->execute($command);
+        $this->assertOk($response, 'STATUS failed');
+
+        foreach ($response->untagged as $line) {
+            if (preg_match('/\A\*\s+STATUS\s+(.*)\z/is', $line, $match) !== 1) {
+                continue;
+            }
+
+            $tokens = ImapParser::parse($match[1]);
+            if (! isset($tokens[1]) || ! is_array($tokens[1])) {
+                continue;
+            }
+
+            $values = $this->pairs($tokens[1]);
+
+            return new FolderStatus(
+                name: $mailbox,
+                messages: (int) ($values['MESSAGES'] ?? 0),
+                uidNext: isset($values['UIDNEXT']) ? (int) $values['UIDNEXT'] : null,
+                uidValidity: isset($values['UIDVALIDITY']) ? (int) $values['UIDVALIDITY'] : null,
+                unseen: isset($values['UNSEEN']) ? (int) $values['UNSEEN'] : null,
+            );
+        }
+
+        throw new ImapCommandException('STATUS returned no data.', $response->statusLine());
+    }
+
+    /**
+     * Select a folder and return its counters and UIDVALIDITY / UIDNEXT.
      *
      * @return array{exists: int, recent: int, uidvalidity: int|null, uidnext: int|null}
      */
-    public function selectMailbox(string $mailbox = 'INBOX'): array
+    public function selectFolder(string $mailbox = 'INBOX'): array
     {
-        $rawMailbox = $this->encodeUtf7($mailbox);
-        $escaped = $this->escapeString($rawMailbox);
-        $response = $this->sendCommand("SELECT {$escaped}");
-        $this->assertTaggedOk($response, "SELECT {$mailbox} failed");
+        $this->selectedMailbox = null;
 
-        $info = [
-            'exists' => 0,
-            'recent' => 0,
-            'uidvalidity' => null,
-            'uidnext' => null,
-        ];
+        $response = $this->execute(Command::make('SELECT')->mailbox($mailbox));
+        $this->assertOk($response, 'SELECT failed');
+        $this->selectedMailbox = $mailbox;
 
-        foreach ($response['lines'] as $line) {
+        $info = ['exists' => 0, 'recent' => 0, 'uidvalidity' => null, 'uidnext' => null];
+
+        foreach ($response->untagged as $line) {
             if (preg_match('/^\*\s+(\d+)\s+EXISTS/i', $line, $m)) {
                 $info['exists'] = (int) $m[1];
             } elseif (preg_match('/^\*\s+(\d+)\s+RECENT/i', $line, $m)) {
@@ -209,20 +474,70 @@ class ImapClient
     }
 
     /**
+     * Alias of selectFolder().
+     *
+     * @return array{exists: int, recent: int, uidvalidity: int|null, uidnext: int|null}
+     */
+    public function selectMailbox(string $mailbox = 'INBOX'): array
+    {
+        return $this->selectFolder($mailbox);
+    }
+
+    /**
+     * Search with a typed criteria builder.
+     *
+     * @param SearchCriteria|string $criteria Raw strings are no longer supported (command injection risk) and fail immediately.
+     * @param int|null $limit Return at most this many UIDs (the lowest ones). The server still sends the complete result.
+     * @return list<int>
+     *
+     * @throws BadMethodCallException when a raw string is passed
+     */
+    public function search(SearchCriteria|string $criteria, ?int $limit = null): array
+    {
+        if (is_string($criteria)) {
+            throw new BadMethodCallException(
+                'ImapClient::search(string) was removed because raw criteria allow IMAP command injection. '
+                .'Use ImapClient::search(SearchCriteria::new()->from(...)->unseen()) instead.'
+            );
+        }
+
+        $response = $this->execute($criteria->toCommand());
+        $this->assertOk($response, 'SEARCH failed');
+
+        return $this->limit($this->extractUidsFromSearch($response), $limit);
+    }
+
+    /**
+     * Search UIDs inside a UID range. Prefer this over searchAllUids() on large mailboxes.
+     *
+     * @param int|null $to Last UID or null for "everything from $from on"
+     * @return list<int>
+     */
+    public function searchUidRange(int $from, ?int $to = null, ?int $limit = null): array
+    {
+        $uids = $this->search(SearchCriteria::new()->uidRange($from, $to));
+
+        // "UID n:*" always includes the highest message even when it is below n; filter that quirk out.
+        $uids = array_values(array_filter(
+            $uids,
+            static fn (int $uid): bool => $uid >= $from && ($to === null || $uid <= $to)
+        ));
+
+        return $this->limit($uids, $limit);
+    }
+
+    /**
      * Search unseen emails or emails with UID higher than $lastUid.
      *
      * @return list<int>
      */
     public function searchUnseenOrSinceUid(int $lastUid = 0): array
     {
-        $command = $lastUid > 0
-            ? 'UID SEARCH UID '.($lastUid + 1).':*'
-            : 'UID SEARCH UNSEEN';
+        if ($lastUid > 0) {
+            return $this->searchUidRange($lastUid + 1);
+        }
 
-        $response = $this->sendCommand($command);
-        $this->assertTaggedOk($response, 'SEARCH failed');
-
-        return $this->extractUidsFromSearch($response, $lastUid);
+        return $this->search(SearchCriteria::new()->unseen());
     }
 
     /**
@@ -233,88 +548,94 @@ class ImapClient
     public function searchSinceDays(int $days): array
     {
         $days = max(1, $days);
-        $date = gmdate('d-M-Y', strtotime("-{$days} days"));
 
-        $response = $this->sendCommand("UID SEARCH SINCE {$date}");
-        $this->assertTaggedOk($response, "SEARCH SINCE failed for {$days} days");
-
-        return $this->extractUidsFromSearch($response);
+        return $this->search(SearchCriteria::new()->since(new DateTimeImmutable("-{$days} days", new DateTimeZone('UTC'))));
     }
 
     /**
      * Search all email UIDs in the currently selected mailbox.
      *
+     * Warning: on very large mailboxes the response contains every UID. Use searchUidRange() or search() with a limit.
+     *
      * @return list<int>
      */
     public function searchAllUids(): array
     {
-        $response = $this->sendCommand('UID SEARCH ALL');
-        $this->assertTaggedOk($response, 'SEARCH ALL failed');
-
-        return $this->extractUidsFromSearch($response);
+        return $this->search(SearchCriteria::new()->all());
     }
 
     /**
-     * Search emails by raw criteria (e.g. 'FROM "john" SUBJECT "invoice"').
+     * Fetch UID, FLAGS, INTERNALDATE, RFC822.SIZE and the main headers without the body and without setting \Seen.
      *
-     * @return list<int>
+     * @param int|list<int> $uids
+     * @return list<MessageSummary>
      */
-    public function search(string $criteria): array
+    public function fetchSummaries(int|array $uids): array
     {
-        $response = $this->sendCommand("UID SEARCH {$criteria}");
-        $this->assertTaggedOk($response, "UID SEARCH {$criteria} failed");
+        $summaries = [];
 
-        return $this->extractUidsFromSearch($response);
-    }
+        foreach ($this->uidBatches($uids) as $set) {
+            $command = Command::make('UID FETCH')->atom($set)->atom(
+                '(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])'
+            );
 
-    /**
-     * Fetch raw message stream for a specific UID.
-     *
-     * @return resource Stream containing raw RFC 822 email
-     */
-    public function fetchRawStream(int $uid)
-    {
-        $tag = $this->nextTag();
-        $this->writeLine("{$tag} UID FETCH {$uid} (BODY.PEEK[])");
+            $response = $this->execute($command);
+            $this->assertOk($response, 'FETCH failed');
 
-        $stream = fopen('php://temp', 'r+b');
-        if (! is_resource($stream)) {
-            throw new ImapCommandException('Failed to allocate temporary stream.');
-        }
-
-        $tagFound = false;
-        $tagStatus = '';
-
-        while (! feof($this->socket ?? STDERR)) {
-            $line = $this->readLine();
-
-            if (str_starts_with($line, $tag.' ')) {
-                $tagFound = true;
-                $tagStatus = $line;
-                break;
-            }
-
-            // Check if line indicates literal size: {1234}
-            if (preg_match('/\{(\d+)\}\s*$/', $line, $matches)) {
-                $literalSize = (int) $matches[1];
-                $this->readBytesIntoStream($stream, $literalSize);
-            }
-        }
-
-        if (! $tagFound) {
-            while (! feof($this->socket ?? STDERR)) {
-                $line = $this->readLine();
-                if (str_starts_with($line, $tag.' ')) {
-                    $tagFound = true;
-                    $tagStatus = $line;
-                    break;
+            foreach ($this->parseFetchResponses($response) as $data) {
+                $summary = $this->buildSummary($data);
+                if ($summary !== null) {
+                    $summaries[] = $summary;
                 }
             }
         }
 
-        if (! str_starts_with($tagStatus, "{$tag} OK")) {
+        return $summaries;
+    }
+
+    public function fetchSummary(int $uid): ?MessageSummary
+    {
+        return $this->fetchSummaries($uid)[0] ?? null;
+    }
+
+    /**
+     * Download a message into a stream, chunk by chunk (BODY.PEEK[]<offset.limit>), never setting \Seen.
+     *
+     * RFC822.SIZE is checked first; an oversized message is rejected before any body data is downloaded.
+     *
+     * @param int|null $maxSize Limit in bytes (defaults to setMaxMessageSize())
+     * @return resource Rewound php://temp stream (spills to disk) with the raw RFC 822 message
+     *
+     * @throws ImapMessageTooLargeException
+     */
+    public function fetchRawStream(int $uid, ?int $maxSize = null)
+    {
+        $this->assertUid($uid);
+
+        $size = $this->fetchMessageSize($uid);
+        $limit = $maxSize ?? $this->maxMessageSize;
+        if ($limit !== null && $size > $limit) {
+            throw new ImapMessageTooLargeException($size, $limit);
+        }
+
+        $stream = fopen('php://temp/maxmemory:2097152', 'r+b');
+        if (! is_resource($stream)) {
+            throw new ImapCommandException('Failed to allocate temporary stream.');
+        }
+
+        try {
+            $offset = 0;
+            while ($offset < $size) {
+                $received = $this->fetchChunk($uid, $offset, min($this->chunkSize, $size - $offset), $stream);
+                if ($received === 0) {
+                    throw new ImapCommandException("Server returned no data for UID {$uid} at offset {$offset}.");
+                }
+                $offset += $received;
+            }
+        } catch (Throwable $e) {
             fclose($stream);
-            throw new ImapCommandException("UID FETCH {$uid} failed: {$tagStatus}");
+
+            throw $e;
         }
 
         rewind($stream);
@@ -324,84 +645,193 @@ class ImapClient
 
     /**
      * Fetch and parse an email message by UID into a Message DTO.
+     *
+     * @param int|null $maxSize Maximum RFC822.SIZE in bytes; larger messages throw before any download
+     * @param (Closure(\Maivio\Imap\DTO\Attachment): resource)|null $attachmentSink Receives attachment metadata and returns the stream
+     *        the decoded attachment is written to (see MimeParser::parse())
      */
-    public function getMessage(int $uid): Message
+    public function getMessage(int $uid, ?int $maxSize = null, ?Closure $attachmentSink = null): Message
     {
-        $rawStream = $this->fetchRawStream($uid);
+        $rawStream = $this->fetchRawStream($uid, $maxSize);
 
-        return $this->parser->parse($rawStream, $uid);
+        try {
+            return ($this->parser ?? new MimeParser())->parse($rawStream, $uid, $attachmentSink);
+        } finally {
+            fclose($rawStream);
+        }
+    }
+
+    /**
+     * Add flags (\Seen, \Flagged, \Answered, \Deleted, \Draft) to messages of the selected folder.
+     *
+     * @param int|list<int> $uids
+     * @param Flag|string|list<Flag|string> $flags
+     */
+    public function addFlags(int|array $uids, Flag|string|array $flags): void
+    {
+        $this->store($uids, '+FLAGS.SILENT', $flags);
+    }
+
+    /**
+     * @param int|list<int> $uids
+     * @param Flag|string|list<Flag|string> $flags
+     */
+    public function removeFlags(int|array $uids, Flag|string|array $flags): void
+    {
+        $this->store($uids, '-FLAGS.SILENT', $flags);
+    }
+
+    /**
+     * Replace all flags of the messages with exactly this set.
+     *
+     * @param int|list<int> $uids
+     * @param Flag|string|list<Flag|string> $flags
+     */
+    public function setFlags(int|array $uids, Flag|string|array $flags): void
+    {
+        $this->store($uids, 'FLAGS.SILENT', $flags);
     }
 
     public function markAsSeen(int $uid): void
     {
-        $response = $this->sendCommand("UID STORE {$uid} +FLAGS (\\Seen)");
-        $this->assertTaggedOk($response, "markAsSeen for UID {$uid} failed");
+        $this->addFlags($uid, Flag::Seen);
     }
 
     public function markAsUnseen(int $uid): void
     {
-        $response = $this->sendCommand("UID STORE {$uid} -FLAGS (\\Seen)");
-        $this->assertTaggedOk($response, "markAsUnseen for UID {$uid} failed");
+        $this->removeFlags($uid, Flag::Seen);
     }
 
     /**
-     * Move an email message from source folder to target folder.
+     * Copy a message to another folder.
+     *
+     * @return int|null UID in the target folder (needs UIDPLUS), otherwise null
+     */
+    public function copyMessage(string $sourceFolder, int $uid, string $targetFolder): ?int
+    {
+        $this->assertUid($uid);
+        Encoder::assertSafe($targetFolder, 'mailbox name');
+        $this->selectFolder($sourceFolder);
+
+        $response = $this->execute(Command::make('UID COPY')->atom((string) $uid)->mailbox($targetFolder));
+        $this->assertOk($response, "COPY of UID {$uid} failed");
+
+        return $this->extractCopyUid($response, $uid);
+    }
+
+    /**
+     * Move a message to another folder.
+     *
+     * Uses MOVE (RFC 6851) if offered, otherwise UID COPY + \Deleted + UID EXPUNGE (needs UIDPLUS).
+     * Without MOVE and UIDPLUS an exception is thrown instead of issuing an EXPUNGE that would also remove
+     * unrelated messages flagged \Deleted.
+     *
+     * @param string|null $messageId Used to look up the new UID when the server sends no COPYUID
+     * @return int|null UID in the target folder when it could be determined
      */
     public function moveMessage(string $sourceFolder, int $uid, string $targetFolder, ?string $messageId = null): ?int
     {
-        $this->selectMailbox($sourceFolder);
-
-        $escapedTarget = $this->escapeString($this->encodeUtf7($targetFolder));
-        $newUid = null;
-
-        // Try RFC 6851 UID MOVE first
-        $moveResponse = $this->sendCommand("UID MOVE {$uid} {$escapedTarget}");
-        $isMoveOk = str_starts_with($moveResponse['status'], "{$moveResponse['tag']} OK");
-
-        if ($isMoveOk) {
-            $newUid = $this->extractCopyUid($moveResponse, $uid);
-        } else {
-            // Fallback: RFC 3501 UID COPY + UID STORE +FLAGS (\Deleted) + EXPUNGE
-            $copyResponse = $this->sendCommand("UID COPY {$uid} {$escapedTarget}");
-            $this->assertTaggedOk($copyResponse, "UID COPY {$uid} to {$targetFolder} failed");
-
-            $newUid = $this->extractCopyUid($copyResponse, $uid);
-
-            $storeResponse = $this->sendCommand("UID STORE {$uid} +FLAGS (\\Deleted)");
-            $this->assertTaggedOk($storeResponse, "UID STORE \\Deleted for UID {$uid} failed");
-
-            $expungeResponse = $this->sendCommand('EXPUNGE');
-            $this->assertTaggedOk($expungeResponse, 'EXPUNGE failed after copy');
+        $this->assertUid($uid);
+        Encoder::assertSafe($targetFolder, 'mailbox name');
+        if ($messageId !== null) {
+            Encoder::assertSafe($messageId, 'message id');
         }
 
-        if ($newUid === null && ! empty($messageId)) {
-            try {
-                $this->selectMailbox($targetFolder);
-                $cleanMessageId = trim($messageId, '<>');
-                $escapedMessageId = $this->escapeString("<{$cleanMessageId}>");
-                $searchResponse = $this->sendCommand("UID SEARCH HEADER Message-ID {$escapedMessageId}");
-                if (str_starts_with($searchResponse['status'], "{$searchResponse['tag']} OK")) {
-                    $uids = $this->extractUidsFromSearch($searchResponse);
-                    if (! empty($uids)) {
-                        $newUid = end($uids);
-                    }
-                }
-            } catch (\Throwable) {
-            }
+        $this->selectFolder($sourceFolder);
+
+        if ($this->hasCapability('MOVE')) {
+            $response = $this->execute(Command::make('UID MOVE')->atom((string) $uid)->mailbox($targetFolder));
+            $this->assertOk($response, "MOVE of UID {$uid} failed");
+            $newUid = $this->extractCopyUid($response, $uid);
+        } elseif ($this->hasCapability('UIDPLUS')) {
+            $response = $this->execute(Command::make('UID COPY')->atom((string) $uid)->mailbox($targetFolder));
+            $this->assertOk($response, "COPY of UID {$uid} failed");
+            $newUid = $this->extractCopyUid($response, $uid);
+
+            $this->addFlags($uid, Flag::Deleted);
+            $this->uidExpunge($uid);
+        } else {
+            throw new ImapCommandException(
+                'Cannot move safely: the server supports neither MOVE nor UIDPLUS. '
+                .'A plain EXPUNGE would also delete other messages flagged \\Deleted.'
+            );
+        }
+
+        if ($newUid === null && $messageId !== null && trim($messageId, '<> ') !== '') {
+            $newUid = $this->findUidByMessageId($sourceFolder, $targetFolder, trim($messageId, '<> '));
         }
 
         return $newUid;
     }
 
+    /**
+     * Flag a message \Deleted in the selected folder and (by default) expunge exactly that message.
+     *
+     * Expunging a single message needs UIDPLUS; without it an exception is thrown rather than expunging
+     * every message flagged \Deleted. Pass $expunge = false to only set the flag.
+     */
     public function deleteMessage(int $uid, bool $expunge = true): void
     {
-        $response = $this->sendCommand("UID STORE {$uid} +FLAGS (\\Deleted)");
-        $this->assertTaggedOk($response, "deleteMessage for UID {$uid} failed");
+        $this->assertUid($uid);
+
+        if ($expunge && ! $this->hasCapability('UIDPLUS')) {
+            throw new ImapCommandException(
+                'Cannot expunge a single message: the server does not support UIDPLUS. Use deleteMessage($uid, false) to only flag it.'
+            );
+        }
+
+        $this->addFlags($uid, Flag::Deleted);
 
         if ($expunge) {
-            $expungeResponse = $this->sendCommand('EXPUNGE');
-            $this->assertTaggedOk($expungeResponse, 'EXPUNGE failed');
+            $this->uidExpunge($uid);
         }
+    }
+
+    /**
+     * Append a message (e.g. a copy into "Sent").
+     *
+     * @param string|resource $message Complete RFC 822 message with CRLF line endings; a readable seekable stream is sent in chunks
+     * @param Flag|string|list<Flag|string> $flags
+     * @return int|null UID of the new message (needs UIDPLUS)
+     */
+    public function appendMessage(
+        string $mailbox,
+        mixed $message,
+        Flag|string|array $flags = [],
+        ?DateTimeInterface $internalDate = null,
+    ): ?int {
+        if (is_string($message)) {
+            $literal = Literal::fromString($message);
+        } elseif (is_resource($message)) {
+            $position = ftell($message);
+            $stat = fstat($message);
+            if ($position === false || $stat === false) {
+                throw new InvalidArgumentException('Message stream must be seekable and have a known size.');
+            }
+            $literal = Literal::fromStream($message, max(0, $stat['size'] - $position));
+        } else {
+            throw new InvalidArgumentException('Message must be a string or a stream resource.');
+        }
+
+        $command = Command::make('APPEND')->mailbox($mailbox);
+
+        $flagList = Flag::normalizeList($flags);
+        if ($flagList !== []) {
+            $command->atom('('.implode(' ', array_map(static fn (Flag $f): string => $f->value, $flagList)).')');
+        }
+
+        if ($internalDate !== null) {
+            $command->string($internalDate->format('d-M-Y H:i:s O'), 'date');
+        }
+
+        $response = $this->execute($command->literal($literal));
+        $this->assertOk($response, 'APPEND failed');
+
+        if (preg_match('/\[APPENDUID\s+\d+\s+(\d+)\]/i', $response->text, $m) === 1) {
+            return (int) $m[1];
+        }
+
+        return null;
     }
 
     /**
@@ -409,8 +839,7 @@ class ImapClient
      */
     public function detectTrashFolder(): string
     {
-        $folders = $this->listFolders();
-        foreach ($folders as $folder) {
+        foreach ($this->listFolders() as $folder) {
             if ($folder->isTrash()) {
                 return $folder->getName();
             }
@@ -421,87 +850,386 @@ class ImapClient
 
     public function disconnect(): void
     {
-        if ($this->connected && is_resource($this->socket)) {
+        if ($this->connected && $this->transport !== null && $this->transport->isOpen()) {
             try {
-                $tag = $this->nextTag();
-                $this->writeLine("{$tag} LOGOUT");
-            } catch (\Throwable) {
+                $this->transport->write($this->nextTag()." LOGOUT\r\n");
+            } catch (Throwable) {
             }
-            @fclose($this->socket);
         }
 
-        $this->socket = null;
-        $this->connected = false;
-        $this->tagCounter = 0;
+        $this->closeQuietly();
     }
 
     /**
-     * Encode folder string to Modified UTF-7 (RFC 3501 Section 5.1.3).
+     * Encode a folder name to Modified UTF-7 (RFC 3501 section 5.1.3).
      */
     public function encodeUtf7(string $string): string
     {
-        if ($string === '') {
-            return '';
-        }
-
-        if (function_exists('mb_convert_encoding')) {
-            $converted = @mb_convert_encoding($string, 'UTF7-IMAP', 'UTF-8');
-            if ($converted !== false) {
-                return $converted;
-            }
-        }
-
-        return $string;
+        return Mutf7::encode($string);
     }
 
     /**
-     * Decode Modified UTF-7 folder string to UTF-8.
+     * Decode a Modified UTF-7 folder name to UTF-8.
      */
     public function decodeUtf7(string $string): string
     {
-        if ($string === '') {
-            return '';
+        return Mutf7::decode($string);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Protocol plumbing
+    // ---------------------------------------------------------------------------------------------
+
+    protected function upgradeToTls(): void
+    {
+        if (! $this->hasCapability('STARTTLS')) {
+            throw new ImapConnectionException('The server does not offer STARTTLS; refusing to continue in plaintext.');
         }
 
-        if (function_exists('mb_convert_encoding')) {
-            $converted = @mb_convert_encoding($string, 'UTF-8', 'UTF7-IMAP');
-            if ($converted !== false) {
-                return $converted;
+        $response = $this->execute(Command::make('STARTTLS'));
+        if (! $response->ok()) {
+            throw new ImapConnectionException('The server rejected STARTTLS: '.$response->statusLine());
+        }
+
+        $this->requireTransport()->enableTls();
+        $this->secure = true;
+
+        // Capabilities announced before the handshake must not be trusted.
+        $this->capabilities = [];
+        $this->refreshCapabilities();
+    }
+
+    protected function refreshCapabilities(): void
+    {
+        $response = $this->execute(Command::make('CAPABILITY'));
+        if (! $response->ok()) {
+            throw new ImapConnectionException('CAPABILITY failed: '.$response->statusLine());
+        }
+
+        $capabilities = [];
+        foreach ($response->untagged as $line) {
+            if (preg_match('/\A\*\s+CAPABILITY\s+(.+)\z/i', trim($line), $m) === 1) {
+                foreach (preg_split('/\s+/', trim($m[1])) ?: [] as $token) {
+                    $capabilities[] = strtoupper($token);
+                }
             }
         }
 
-        return $string;
+        $this->capabilities = array_values(array_unique($capabilities));
+    }
+
+    protected function assertMayAuthenticate(): void
+    {
+        if (! $this->isConnected()) {
+            throw new ImapConnectionException('Not connected to an IMAP server.');
+        }
+
+        if (! $this->secure && ! $this->allowInsecure) {
+            throw new ImapAuthenticationException('Refusing to send credentials over an unencrypted connection.');
+        }
+    }
+
+    protected function execute(Command $command, ?Closure $onContinuation = null): Response
+    {
+        $tag = $this->nextTag();
+        $this->sendCommand($tag, $command);
+
+        return $this->readResponse($tag, $onContinuation);
+    }
+
+    protected function sendCommand(string $tag, Command $command): void
+    {
+        $transport = $this->requireTransport();
+        $this->log('C', $tag.' '.$command->describe());
+
+        $buffer = $tag.' '.$command->verb();
+
+        foreach ($command->parts() as $part) {
+            if (! $part instanceof Literal) {
+                $buffer .= ' '.$part;
+
+                continue;
+            }
+
+            $nonSynchronizing = $this->hasCapability('LITERAL+');
+            $transport->write($buffer.' {'.$part->length.($nonSynchronizing ? '+' : '')."}\r\n");
+            $buffer = '';
+
+            try {
+                if (! $nonSynchronizing) {
+                    $this->awaitContinuation($tag);
+                }
+
+                $part->writeTo($transport);
+            } catch (Throwable $e) {
+                // The server is waiting for literal bytes that will never arrive: the stream is out of sync.
+                $this->closeQuietly();
+
+                throw $e;
+            }
+        }
+
+        $transport->write($buffer."\r\n");
+    }
+
+    protected function awaitContinuation(string $tag): void
+    {
+        for ($i = 0; $i < 1000; $i++) {
+            $line = $this->readLine();
+
+            if (str_starts_with($line, '+')) {
+                return;
+            }
+
+            if (str_starts_with($line, $tag.' ')) {
+                throw new ImapCommandException('The server refused the command before accepting its literal: '.$this->scrub($line), $this->scrub($line));
+            }
+        }
+
+        throw new ImapConnectionException('No continuation request received from the server.');
     }
 
     /**
-     * @return array{tag: string, ok: bool, status: string, lines: list<string>}
+     * @param (Closure(string): string)|null $onContinuation Called for "+" lines; returns the line to send in reply
      */
-    protected function sendCommand(string $command): array
+    protected function readResponse(string $tag, ?Closure $onContinuation = null): Response
     {
-        $tag = $this->nextTag();
-        $this->writeLine("{$tag} {$command}");
+        $transport = $this->requireTransport();
+        $untagged = [];
+        $budget = $this->maxResponseSize;
 
-        $lines = [];
-        $taggedStatus = '';
+        while (true) {
+            $line = $this->readLogicalLine($budget);
 
-        while (! feof($this->socket ?? STDERR)) {
-            $line = $this->readLine();
-            $lines[] = $line;
+            if ($line === '') {
+                continue;
+            }
+
+            if ($line[0] === '+') {
+                if ($onContinuation === null) {
+                    throw new ImapConnectionException('Unexpected continuation request from the server.');
+                }
+
+                $transport->write($onContinuation($line)."\r\n");
+
+                continue;
+            }
 
             if (str_starts_with($line, $tag.' ')) {
-                $taggedStatus = $line;
+                $parts = explode(' ', $line, 3);
+                $status = strtoupper($parts[1] ?? '');
+
+                return new Response($tag, $status, $parts[2] ?? '', $untagged);
+            }
+
+            if (str_starts_with($line, '* BYE')) {
+                $this->closeQuietly();
+
+                throw new ImapConnectionException('The server closed the connection: '.$this->scrub($line));
+            }
+
+            $untagged[] = $line;
+        }
+    }
+
+    /**
+     * Read one response line; literals ("{n}") are read and inlined as "{n}\r\n<bytes>" followed by the rest of the line.
+     */
+    protected function readLogicalLine(int &$budget): string
+    {
+        $segment = $this->readLine();
+        $full = '';
+
+        while (true) {
+            $full .= $segment;
+            $budget -= strlen($segment);
+
+            if (preg_match('/\{(\d+)\}\z/', $segment, $match) !== 1) {
                 break;
+            }
+
+            $size = (int) $match[1];
+            if ($size > $this->maxInlineLiteral || $size > $budget) {
+                throw new ImapConnectionException("Server literal of {$size} bytes exceeds the response limit.");
+            }
+
+            $full .= "\r\n".$this->readExact($size);
+            $budget -= $size;
+            $segment = $this->readLine();
+        }
+
+        if ($budget < 0) {
+            throw new ImapConnectionException('Server response exceeds the size limit.');
+        }
+
+        return $full;
+    }
+
+    protected function readLine(): string
+    {
+        $line = $this->requireTransport()->readLine();
+        $this->log('S', $line);
+
+        return $line;
+    }
+
+    protected function readExact(int $size): string
+    {
+        $transport = $this->requireTransport();
+        $data = '';
+
+        while ($size > 0) {
+            $chunk = $transport->read(min($size, 65536));
+            $data .= $chunk;
+            $size -= strlen($chunk);
+        }
+
+        return $data;
+    }
+
+    /**
+     * Copy exactly $size bytes of a literal from the connection into $sink.
+     *
+     * @param resource $sink
+     */
+    protected function copyLiteral(int $size, $sink): void
+    {
+        $transport = $this->requireTransport();
+
+        while ($size > 0) {
+            $chunk = $transport->read(min($size, 65536));
+            if (fwrite($sink, $chunk) !== strlen($chunk)) {
+                throw new ImapCommandException('Failed writing message data to the temporary stream.');
+            }
+            $size -= strlen($chunk);
+        }
+    }
+
+    /**
+     * Download bytes [$offset, $offset + $length) of the message body into $sink.
+     *
+     * @param resource $sink
+     * @return int Number of bytes received
+     */
+    protected function fetchChunk(int $uid, int $offset, int $length, $sink): int
+    {
+        $tag = $this->nextTag();
+        $this->sendCommand($tag, Command::make('UID FETCH')->atom((string) $uid)->atom("(BODY.PEEK[]<{$offset}.{$length}>)"));
+
+        $received = 0;
+
+        while (true) {
+            $line = $this->readLine();
+
+            if (str_starts_with($line, $tag.' ')) {
+                $parts = explode(' ', $line, 3);
+                if (strtoupper($parts[1] ?? '') !== 'OK') {
+                    throw new ImapCommandException("FETCH of UID {$uid} failed: ".$this->scrub($line), $this->scrub($line));
+                }
+
+                return $received;
+            }
+
+            $isBodyLine = $received === 0
+                && preg_match('/\A\*\s+\d+\s+FETCH\b/i', $line) === 1
+                && stripos($line, 'BODY[') !== false;
+
+            while (preg_match('/\{(\d+)\}\z/', $line, $match) === 1) {
+                $size = (int) $match[1];
+
+                if ($isBodyLine) {
+                    if ($size > $length) {
+                        throw new ImapConnectionException('The server returned more data than requested.');
+                    }
+
+                    $this->copyLiteral($size, $sink);
+                    $received += $size;
+                    $isBodyLine = false;
+                } else {
+                    $this->copyLiteral($size, $this->nullSink());
+                }
+
+                $line = $this->readLine(); // remainder of the response line after the literal
+            }
+        }
+    }
+
+    /**
+     * @return resource
+     */
+    protected function nullSink()
+    {
+        $sink = fopen('php://memory', 'wb');
+        if (! is_resource($sink)) {
+            throw new ImapCommandException('Failed to allocate stream.');
+        }
+
+        return $sink;
+    }
+
+    protected function fetchMessageSize(int $uid): int
+    {
+        $response = $this->execute(Command::make('UID FETCH')->atom((string) $uid)->atom('(RFC822.SIZE)'));
+        $this->assertOk($response, "FETCH of UID {$uid} failed");
+
+        foreach ($this->parseFetchResponses($response) as $data) {
+            if (isset($data['RFC822.SIZE']) && is_string($data['RFC822.SIZE']) && ctype_digit($data['RFC822.SIZE'])) {
+                return (int) $data['RFC822.SIZE'];
             }
         }
 
-        $isOk = str_starts_with($taggedStatus, "{$tag} OK");
+        throw new ImapCommandException("Message with UID {$uid} was not found.", $response->statusLine());
+    }
 
-        return [
-            'tag' => $tag,
-            'ok' => $isOk,
-            'status' => $taggedStatus,
-            'lines' => $lines,
-        ];
+    /**
+     * @param int|list<int> $uids
+     * @param Flag|string|list<Flag|string> $flags
+     */
+    protected function store(int|array $uids, string $mode, Flag|string|array $flags): void
+    {
+        $flagList = Flag::normalizeList($flags);
+        if ($flagList === [] && $mode !== 'FLAGS.SILENT') {
+            return;
+        }
+
+        $flagAtom = '('.implode(' ', array_map(static fn (Flag $f): string => $f->value, $flagList)).')';
+
+        foreach ($this->uidBatches($uids) as $set) {
+            $response = $this->execute(Command::make('UID STORE')->atom($set)->atom($mode)->atom($flagAtom));
+            $this->assertOk($response, "STORE {$mode} failed");
+        }
+    }
+
+    protected function uidExpunge(int $uid): void
+    {
+        $this->assertOk($this->execute(Command::make('UID EXPUNGE')->atom((string) $uid)), "EXPUNGE of UID {$uid} failed");
+    }
+
+    protected function findUidByMessageId(string $sourceFolder, string $targetFolder, string $messageId): ?int
+    {
+        try {
+            $this->selectFolder($targetFolder);
+            $response = $this->execute(
+                Command::make('UID SEARCH')->atom('HEADER Message-ID')->string("<{$messageId}>", 'message id')
+            );
+
+            if ($response->ok()) {
+                $uids = $this->extractUidsFromSearch($response);
+
+                return $uids === [] ? null : end($uids);
+            }
+        } catch (ImapConnectionException $e) {
+            throw $e;
+        } catch (Throwable) {
+            // best effort only
+        } finally {
+            try {
+                $this->selectFolder($sourceFolder);
+            } catch (Throwable) {
+            }
+        }
+
+        return null;
     }
 
     protected function nextTag(): string
@@ -511,120 +1239,265 @@ class ImapClient
         return sprintf('A%04d', $this->tagCounter);
     }
 
-    protected function writeLine(string $line): void
+    protected function requireTransport(): Transport
     {
-        if (! is_resource($this->socket)) {
+        if ($this->transport === null || ! $this->transport->isOpen()) {
             throw new ImapConnectionException('Socket is not connected or already closed.');
         }
 
-        $data = $line."\r\n";
-        $length = strlen($data);
-        $written = @fwrite($this->socket, $data);
-
-        if ($written !== $length) {
-            throw new ImapConnectionException("Failed to write command to IMAP socket: {$line}");
-        }
+        return $this->transport;
     }
 
-    protected function readLine(): string
+    protected function closeQuietly(): void
     {
-        if (! is_resource($this->socket)) {
-            throw new ImapConnectionException('Socket is not connected or already closed.');
-        }
+        $this->transport?->close();
+        $this->transport = null;
+        $this->connected = false;
+        $this->secure = false;
+        $this->tagCounter = 0;
+        $this->capabilities = [];
+        $this->selectedMailbox = null;
+        $this->secrets = [];
+    }
 
-        $line = fgets($this->socket);
-        if ($line === false) {
-            throw new ImapConnectionException('Connection lost or timed out while reading line from IMAP socket.');
+    protected function log(string $direction, string $line): void
+    {
+        if ($this->debugLogger !== null) {
+            ($this->debugLogger)($direction, $this->scrub($line));
         }
-
-        return rtrim($line, "\r\n");
     }
 
     /**
-     * @param resource $destStream
+     * Replace credentials used on this connection by "***" in server supplied text.
      */
-    protected function readBytesIntoStream($destStream, int $bytesToRead): void
+    protected function scrub(string $text): string
     {
-        if (! is_resource($this->socket)) {
-            throw new ImapConnectionException('Socket is not connected.');
+        foreach ($this->secrets as $secret) {
+            if ($secret !== '') {
+                $text = str_replace($secret, '***', $text);
+            }
         }
 
-        $remaining = $bytesToRead;
-        $chunkSize = 8192;
+        return $text;
+    }
 
-        while ($remaining > 0 && ! feof($this->socket)) {
-            $readLength = min($remaining, $chunkSize);
-            $chunk = fread($this->socket, $readLength);
+    protected function assertOk(Response $response, string $message): void
+    {
+        if (! $response->ok()) {
+            $status = $this->scrub($response->statusLine());
 
-            if ($chunk === false || $chunk === '') {
-                throw new ImapConnectionException("Premature EOF while reading literal ({$remaining} bytes remaining).");
+            throw new ImapCommandException("{$message}: {$status}", $status);
+        }
+    }
+
+    protected function assertUid(int $uid): void
+    {
+        if ($uid < 1) {
+            throw new InvalidArgumentException('UID must be a positive integer.');
+        }
+    }
+
+    /**
+     * Folder names that are modified (create/rename/delete/subscribe) must be plain names.
+     */
+    protected function assertManageableFolderName(string $name): void
+    {
+        if (trim($name) === '') {
+            throw new InvalidArgumentException('Folder name must not be empty.');
+        }
+
+        Encoder::assertSafe($name, 'folder name');
+
+        if (strpbrk($name, '*%{}') !== false) {
+            throw new InvalidArgumentException('Folder names must not contain wildcards (* %) or braces.');
+        }
+    }
+
+    protected function assertNotInbox(string $name, string $action): void
+    {
+        if (strcasecmp(trim($name), 'INBOX') === 0) {
+            throw new InvalidArgumentException("The INBOX folder cannot be used to {$action}.");
+        }
+    }
+
+    /**
+     * @param int|list<int> $uids
+     * @return list<string> UID sets (comma/range notation), at most 500 UIDs each
+     */
+    protected function uidBatches(int|array $uids): array
+    {
+        $list = is_array($uids) ? $uids : [$uids];
+
+        foreach ($list as $uid) {
+            if (! is_int($uid)) {
+                throw new InvalidArgumentException('UIDs must be integers.');
+            }
+            $this->assertUid($uid);
+        }
+
+        if ($list === []) {
+            return [];
+        }
+
+        $list = array_values(array_unique($list));
+        sort($list);
+
+        $batches = [];
+        foreach (array_chunk($list, 500) as $chunk) {
+            $ranges = [];
+            $start = $previous = $chunk[0];
+
+            foreach (array_slice($chunk, 1) as $uid) {
+                if ($uid === $previous + 1) {
+                    $previous = $uid;
+
+                    continue;
+                }
+
+                $ranges[] = $start === $previous ? (string) $start : "{$start}:{$previous}";
+                $start = $previous = $uid;
             }
 
-            fwrite($destStream, $chunk);
-            $remaining -= strlen($chunk);
+            $ranges[] = $start === $previous ? (string) $start : "{$start}:{$previous}";
+            $batches[] = implode(',', $ranges);
         }
+
+        return $batches;
     }
 
     /**
-     * @param array{tag: string, ok: bool, status: string, lines: list<string>} $response
-     */
-    protected function assertTaggedOk(array $response, string $errorMessage): void
-    {
-        if (! $response['ok']) {
-            throw new ImapCommandException("{$errorMessage}: {$response['status']}");
-        }
-    }
-
-    protected function escapeString(string $string): string
-    {
-        $escaped = str_replace(['\\', '"'], ['\\\\', '\\"'], $string);
-
-        return "\"{$escaped}\"";
-    }
-
-    /**
-     * @param array{tag: string, ok: bool, lines: list<string>} $response
+     * @param list<int> $uids
      * @return list<int>
      */
-    protected function extractUidsFromSearch(array $response, int $minUid = 0): array
+    protected function limit(array $uids, ?int $limit): array
+    {
+        if ($limit === null) {
+            return $uids;
+        }
+
+        if ($limit < 1) {
+            throw new InvalidArgumentException('Limit must be a positive integer.');
+        }
+
+        return array_slice($uids, 0, $limit);
+    }
+
+    /**
+     * @param list<mixed> $list
+     * @return array<string, mixed> Upper-cased key => value
+     */
+    protected function pairs(array $list): array
+    {
+        $result = [];
+        for ($i = 0; $i + 1 < count($list); $i += 2) {
+            if (is_string($list[$i])) {
+                $result[strtoupper($list[$i])] = $list[$i + 1];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return list<array<string, mixed>> One upper-cased key => value map per "* n FETCH (...)" line
+     */
+    protected function parseFetchResponses(Response $response): array
+    {
+        $result = [];
+
+        foreach ($response->untagged as $line) {
+            if (preg_match('/\A\*\s+\d+\s+FETCH\s+(.*)\z/is', $line, $match) !== 1) {
+                continue;
+            }
+
+            $tokens = ImapParser::parse($match[1]);
+            if (isset($tokens[0]) && is_array($tokens[0])) {
+                $result[] = $this->pairs($tokens[0]);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    protected function buildSummary(array $data): ?MessageSummary
+    {
+        if (! isset($data['UID']) || ! is_string($data['UID']) || ! ctype_digit($data['UID'])) {
+            return null;
+        }
+
+        $headerBlock = '';
+        foreach ($data as $key => $value) {
+            if (str_starts_with($key, 'BODY[') && is_string($value)) {
+                $headerBlock = $value;
+            }
+        }
+
+        $parser = $this->parser ?? new MimeParser();
+        $headers = $parser->parseHeaderBlock($headerBlock);
+        [$senderEmail, $senderName] = isset($headers['from']) ? $parser->extractSender($headers['from']) : [null, null];
+
+        $internalDate = null;
+        if (isset($data['INTERNALDATE']) && is_string($data['INTERNALDATE'])) {
+            $parsed = DateTimeImmutable::createFromFormat('j-M-Y H:i:s O', trim($data['INTERNALDATE']));
+            $internalDate = $parsed !== false ? $parsed : null;
+        }
+
+        $flags = isset($data['FLAGS']) && is_array($data['FLAGS'])
+            ? array_values(array_filter($data['FLAGS'], 'is_string'))
+            : [];
+
+        return new MessageSummary(
+            uid: (int) $data['UID'],
+            flags: $flags,
+            internalDate: $internalDate,
+            size: isset($data['RFC822.SIZE']) && is_string($data['RFC822.SIZE']) ? (int) $data['RFC822.SIZE'] : 0,
+            messageId: isset($headers['message-id']) ? $parser->extractMessageId($headers['message-id']) : null,
+            subject: isset($headers['subject']) ? $parser->decodeMimeHeader($headers['subject']) : null,
+            senderEmail: $senderEmail,
+            senderName: $senderName,
+            date: $parser->extractDate($headers['date'] ?? null),
+            headers: $headers,
+        );
+    }
+
+    /**
+     * @return list<int>
+     */
+    protected function extractUidsFromSearch(Response $response): array
     {
         $uids = [];
 
-        foreach ($response['lines'] as $line) {
-            if (str_starts_with($line, '* SEARCH')) {
-                $parts = preg_split('/\s+/', trim($line));
-                if (is_array($parts)) {
-                    array_shift($parts); // remove '*'
-                    array_shift($parts); // remove 'SEARCH'
+        foreach ($response->untagged as $line) {
+            if (preg_match('/\A\*\s+SEARCH\b(.*)\z/is', $line, $match) !== 1) {
+                continue;
+            }
 
-                    foreach ($parts as $part) {
-                        if (is_numeric($part)) {
-                            $uid = (int) $part;
-                            if ($minUid <= 0 || $uid > $minUid) {
-                                $uids[] = $uid;
-                            }
-                        }
-                    }
+            if (preg_match_all('/\d+/', $match[1], $numbers) > 0) {
+                foreach ($numbers[0] as $number) {
+                    $uids[] = (int) $number;
                 }
             }
         }
 
+        $uids = array_values(array_unique($uids));
         sort($uids, SORT_NUMERIC);
 
-        return array_values(array_unique($uids));
+        return $uids;
     }
 
-    /**
-     * @param array{tag: string, ok: bool, status: string, lines: list<string>} $response
-     */
-    protected function extractCopyUid(array $response, int $sourceUid): ?int
+    protected function extractCopyUid(Response $response, int $sourceUid): ?int
     {
-        foreach ($response['lines'] as $line) {
-            // Format: [COPYUID <validity> <source-uid> <target-uid>]
-            if (preg_match('/\[COPYUID\s+\d+\s+(\d+)\s+(\d+)\]/i', $line, $matches)) {
-                if ((int) $matches[1] === $sourceUid) {
-                    return (int) $matches[2];
-                }
+        $lines = [...$response->untagged, $response->text];
+
+        foreach ($lines as $line) {
+            // [COPYUID <validity> <source-uids> <target-uids>]
+            if (preg_match('/\[COPYUID\s+\d+\s+([\d:,*]+)\s+([\d:,*]+)\]/i', $line, $matches) === 1
+                && $matches[1] === (string) $sourceUid
+                && ctype_digit($matches[2])) {
+                return (int) $matches[2];
             }
         }
 
